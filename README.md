@@ -16,4 +16,4 @@ This project will investigate different tokenization schemes for language models
 * Analyze the **trade-offs in model size, training speed, and performance** for each tokenization scheme.
 * (Optional extension) Explore generalization to non-text data, such as byte-level modeling of structured files.
 
-*This project will be supervised by TA Anders Vestergaard Nørskov (avensko@dtu.dk).*
+*This project will be supervised by TA Anders Vestergaard Nørskov (aveno@dtu.dk).*
