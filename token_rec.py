@@ -17,7 +17,41 @@ import tokenizers
 import datasets
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from torch.utils.data import DataLoader
-from script1 import glove_vectors, glove_vocabulary, glove_tokenizer
+import pickle
+
+
+GLOVE_PICKLE_FILE = "glove_data.pickle"
+
+# 1. Check if the pickle file already exists
+if not Path(GLOVE_PICKLE_FILE).exists():
+    rich.print(f"[bold cyan]Saving GloVe data to {GLOVE_PICKLE_FILE} ...[/bold cyan]")
+
+    #   This import automatically downloads the full dataset
+    from script1 import glove_vectors, glove_vocabulary, glove_tokenizer
+    
+    # 2. Create a dictionary containing all necessary GloVe components
+    glove_data_to_save = {
+        "vectors": glove_vectors,
+        "vocabulary": glove_vocabulary,
+        "tokenizer": glove_tokenizer
+    }
+    
+    # 3. Write the dictionary to the pickle file
+    try:
+        with open(GLOVE_PICKLE_FILE, 'wb') as f:
+            pickle.dump(glove_data_to_save, f)
+        rich.print(f"[bold green]Successfully saved GloVe data.[/bold green]")
+        
+    except Exception as e:
+        rich.print(f"[bold red]ERROR saving GloVe data:[/bold red] {e}")
+
+else:
+    with open(GLOVE_PICKLE_FILE, 'rb') as f:
+        loaded_data = pickle.load(f)
+        glove_vectors = loaded_data['vectors']
+        glove_vocabulary = loaded_data['vocabulary']
+        glove_tokenizer = loaded_data['tokenizer']
+        
 
 sns.set_theme()
 
@@ -29,7 +63,7 @@ sns.set_theme()
 # TOKEN = 1: Original GloVe Tokenizer
 # TOKEN = 2: HuggingFace WordPiece (BERT-base-uncased)
 # TOKEN = 3: HuggingFace BPE (GPT-2)
-TOKEN = 3
+TOKEN = 1
 
 # Global variables for conditional model setup
 current_tokenizer = None
@@ -388,26 +422,26 @@ def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:
     
     # Set font size for the Y-axis labels
     ax.set_yticks(np.arange(len(queries_labels)))
-    ax.set_yticklabels(queries_labels, fontsize=8) 
+    ax.set_yticklabels(queries_labels, fontsize=4) 
     
     # Set font size for the X-axis labels
     ax.set_xticks(np.arange(len(keys_labels)))
-    ax.set_xticklabels(keys_labels, fontsize=8) 
+    ax.set_xticklabels(keys_labels, fontsize=4) 
     
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-    ax.set_ylabel("$\mathbf{Q}$", fontsize=10) 
-    ax.set_xlabel("$\mathbf{K}$", fontsize=10) 
+    ax.set_ylabel("$\mathbf{Q}$", fontsize=7) 
+    ax.set_xlabel("$\mathbf{K}$", fontsize=7) 
 
     if print_values:
         for i in range(len(queries_labels)):
             for j in range(len(keys_labels)):
                 text = ax.text(j, i, f"{attention_map[i, j]:.2f}",
-                            ha="center", va="center", color="w", fontsize=7)
+                            ha="center", va="center", color="w", fontsize=4)
 
     if color_bar:
       cbar = fig.colorbar(im, fraction=0.02, pad=0.04)
-      cbar.ax.tick_params(labelsize=8)
+      cbar.ax.tick_params(labelsize=4)
       
     fig.tight_layout()
 
@@ -446,10 +480,11 @@ fig, axes = plt.subplots(ncols=1+len(masks), figsize = (16,6), sharex=False, sha
 
 # plot the gradient map from the RNN LM
 axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-axes.flat[0].set_xlabel("$t$ (input)")
-axes.flat[0].set_ylabel("$t'$ (output)")
+axes.flat[0].set_xlabel("$t$ (input)",fontsize=4)
+axes.flat[0].set_ylabel("$t'$ (output)",fontsize=4)
 axes.flat[0].grid(False)
-axes.flat[0].set_title("gradient map (RNN LM)")
+axes.flat[0].set_title("Gradient map (RNN LM)",fontsize=6)
+axes.flat[0].tick_params(axis='both', which='major', labelsize=4)
 
 # plot the attention map
 for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
@@ -459,6 +494,6 @@ for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
 
         # Use log() to better visualize the zero/masked areas
         plot_attention_map(attention_map_masked.log(), tokens, tokens, ax=ax, color_bar=False)
-    ax.set_title(f"Attention map {mask_name}")
+    ax.set_title(f"Attention map {mask_name}",fontsize=6)
 plt.tight_layout()
 plt.show()
