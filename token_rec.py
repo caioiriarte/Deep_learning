@@ -309,6 +309,7 @@ for epoch in range(NUM_EPOCHS):
     # Set model to training mode
     rnn.train() 
     total_loss = 0
+    total_tokens = 0
     
     for step, token_ids_batch in enumerate(tqdm(train_dataloader, desc=f"Epoch {epoch+1}")):
         
@@ -326,13 +327,17 @@ for epoch in range(NUM_EPOCHS):
         
         # 4. Calculate Loss
         loss = criterion(logits_flat, targets)
-        total_loss += loss.item()
+        
+        # weight the loss by the number of non-PAD tokens
+        batch_tokens = (targets != PAD_IDX).sum().item()
+        total_loss += loss.item() * batch_tokens
+        total_tokens += batch_tokens
 
         # 5. Backward Pass and Optimization
         loss.backward()
         optimizer.step()
         
-    avg_loss = total_loss / len(train_dataloader)
+    avg_loss = total_loss / total_tokens
     rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
 
 # ----------------------------------------------------------------------
@@ -343,6 +348,8 @@ rich.print("[bold green]STARTING TESTING...[/bold green]")
 # Set model to evaluation mode
 rnn.eval()
 total_test_loss = 0
+total_test_tokens = 0
+
 with torch.no_grad():
     for step, token_ids_batch in enumerate(tqdm(
         torch.utils.data.DataLoader(
@@ -366,8 +373,13 @@ with torch.no_grad():
         
         # Calculate Loss
         loss = criterion(logits_flat, targets)
-        total_test_loss += loss.item()
-avg_test_loss = total_test_loss / len(dataset["test"])
+
+        # weight the loss by the number of non-PAD tokens
+        batch_tokens = (targets != PAD_IDX).sum().item()
+        total_test_loss += loss.item() * batch_tokens
+        total_test_tokens += batch_tokens
+
+avg_test_loss = total_test_loss / total_test_tokens
 rich.print(f"[bold green]Testing Complete. Average Test Loss: {avg_test_loss:.4f}[/bold green]")
 
 # ----------------------------------------------------------------------
