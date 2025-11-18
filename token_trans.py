@@ -306,10 +306,66 @@ for epoch in range(NUM_EPOCHS):
 current_model.eval()
 
 # ----------------------------------------------------------------------
+#   NORMALIZED LENGTH SCORE (NLS) EVALUATION
+# ----------------------------------------------------------------------
+
+rich.print("\n[bold yellow]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold yellow]\n")
+
+# --- 1. Define Constant Test Sentence ---
+# Use the same sentence from the attention map visualization
+nls_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
+
+# --- 2. Calculate Baseline Metrics (Constant) ---
+# Count words (W) and characters (C)
+nls_word_count = len(nls_sentence.split())
+nls_char_count = len(nls_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
+
+# --- 3. Setup Reference Tokenizer (Llama 3 8B) ---
+# We use a known efficient tokenizer like Llama for the NLS (Reference) metric
+llama_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", use_fast=True)
+
+# --- 4. Tokenize and Calculate NLS Metrics ---
+
+# A. Tokenize with the CURRENT Tokenizer
+current_tokenizer_ids = batch_tokenize({"text": [nls_sentence]}, max_length=100, tokenizer=current_tokenizer)['token_ids'][0]
+current_token_count = len([id for id in current_tokenizer_ids if id != PAD_IDX])
+
+# B. Calculate NLS_W (Word-Normalized Length)
+nls_w = current_token_count / nls_word_count
+rich.print(f"NLS_w: {nls_w:.4f} (Tokens per Word)")
+
+# C. Calculate NLS_C (Character-Normalized Length)
+nls_c = current_token_count / nls_char_count
+rich.print(f"NLS_c: {nls_c:.4f} (Tokens per Character)")
+
+
+# D. Calculate NLS (Reference)
+if llama_tokenizer is not None:
+    # Tokenize with the REFERENCE Tokenizer
+    llama_tokenization = llama_tokenizer(
+        nls_sentence,
+        max_length=100,
+        padding=False,
+        truncation=True,
+        return_attention_mask=False
+    )
+    # Exclude special tokens like BOS/EOS/Pad if they were included
+    llama_token_ids = llama_tokenization["input_ids"]
+    llama_token_count = len(llama_token_ids)
+    
+    # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
+    nls_ref = current_token_count / llama_token_count
+
+    rich.print(f"[bold yellow]NLS (Reference: T/R): {nls_ref:.4f}[/bold yellow] (Efficiency vs. Llama)")
+
+
+rich.print("\n[bold yellow]NLS Evaluation Complete.[/bold yellow]")
+
+# ----------------------------------------------------------------------
 #   GRADIENT VISUALIZATION TEST
 # ----------------------------------------------------------------------
 
-rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
+rich.print("\n[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
 #   Reset gradients 
 current_model.zero_grad()
@@ -366,6 +422,7 @@ else:
 # ----------------------------------------------------------------------
 #   ATTENTION MAP VISUALIZATION
 # ----------------------------------------------------------------------
+
 rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
 
 def get_tokens_from_ids(token_ids, tokenizer):
