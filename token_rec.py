@@ -9,6 +9,8 @@ from pathlib import Path
 from tqdm import tqdm
 import rich
 from typing import List, Tuple, Dict, Any, Union
+import matplotlib
+matplotlib.use('TkAgg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
@@ -20,6 +22,7 @@ from torch.utils.data import DataLoader
 import pickle
 
 
+## LOAD OR SAVE GLOVE DATA
 GLOVE_PICKLE_FILE = "glove_data.pickle"
 
 # 1. Check if the pickle file already exists
@@ -252,7 +255,7 @@ dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if l
 dataset = dataset.map(
     partial(batch_tokenize, tokenizer=current_tokenizer), 
     batched=True, 
-    num_proc=2, 
+    num_proc=2,           # To parallelize 
     batch_size=10,
     load_from_cache_file=False 
 )
@@ -331,6 +334,41 @@ for epoch in range(NUM_EPOCHS):
         
     avg_loss = total_loss / len(train_dataloader)
     rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
+
+# ----------------------------------------------------------------------
+# BLOCK 8: TESTING AND OBTAINING METRICS
+# ----------------------------------------------------------------------
+rich.print("[bold green]STARTING TESTING...[/bold green]")
+
+# Set model to evaluation mode
+rnn.eval()
+total_test_loss = 0
+with torch.no_grad():
+    for step, token_ids_batch in enumerate(tqdm(
+        torch.utils.data.DataLoader(
+            dataset["test"],
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            collate_fn=custom_collate_fn,
+            pin_memory=True,
+        ),
+        desc="Testing"
+    )):
+        
+        token_ids_batch = token_ids_batch.to(DEVICE) 
+
+        # Forward Pass
+        logits = rnn(token_ids_batch)
+        
+        # Prepare Logits and Targets
+        logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+        targets = token_ids_batch[:, 1:].reshape(-1)
+        
+        # Calculate Loss
+        loss = criterion(logits_flat, targets)
+        total_test_loss += loss.item()
+avg_test_loss = total_test_loss / len(dataset["test"])
+rich.print(f"[bold green]Testing Complete. Average Test Loss: {avg_test_loss:.4f}[/bold green]")
 
 # ----------------------------------------------------------------------
 # BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
