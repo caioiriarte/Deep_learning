@@ -20,6 +20,7 @@ import datasets
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from torch.utils.data import DataLoader
 import pickle
+import time
 
 
 ## LOAD OR SAVE GLOVE DATA
@@ -66,7 +67,7 @@ sns.set_theme()
 # TOKEN = 1: Original GloVe Tokenizer
 # TOKEN = 2: HuggingFace WordPiece (BERT-base-uncased)
 # TOKEN = 3: HuggingFace BPE (GPT-2)
-TOKEN = 3
+TOKEN = 2
 
 # Global variables for conditional model setup
 current_tokenizer = None
@@ -113,8 +114,8 @@ else:
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
-NUM_EPOCHS = 8
-max_dataset_size = 1000000
+NUM_EPOCHS = 10
+max_dataset_size = 1000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -138,23 +139,43 @@ def custom_collate_fn(batch):
     return torch.tensor(token_ids_list, dtype=torch.long) 
 
 
+def get_tokens_from_ids(token_ids, tokenizer):
+    if isinstance(tokenizer, tokenizers.Tokenizer):
+        if hasattr(tokenizer, 'get_vocabulary'):
+            vocab = tokenizer.get_vocabulary()
+            return [vocab[i] for i in token_ids]
+        else:
+            return [str(i) for i in token_ids] 
+    elif isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)): 
+        return tokenizer.convert_ids_to_tokens(token_ids.tolist())
+    return [str(i) for i in token_ids]
+
+
 def batch_tokenize(
     batch: List[Dict[str, Any]], 
     max_length=max_seq_size, 
-    # Update type hint to include both base classes
     tokenizer: Union[tokenizers.Tokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast] = None, 
     key:str="text"
 ) -> Dict[str, Any]:
     texts = batch[key]
     
     if isinstance(tokenizer, tokenizers.Tokenizer):
-        # ... (logic for TOKEN=1)
+        # Handle original `tokenizers` library output (TOKENIZER=1)
         encodings = tokenizer.encode_batch(texts)
-        return {"token_ids": [x.ids[:max_length] for x in encodings]}
+        token_ids_padded = []
+
+        for x in encodings:
+            #   Truncate
+            ids = x.ids[:max_length]
+            #   Pad
+            padding_needed = max_length - len(ids)
+            ids.extend([PAD_IDX] * padding_needed)
+            token_ids_padded.append(ids)
+            
+        return {"token_ids": token_ids_padded}
     
-    # Use a check that covers both PreTrainedTokenizer and PreTrainedTokenizerFast
     elif isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-        # Handle Hugging Face `transformers` output (TOKEN=2 and 3)
+        # Handle Hugging Face `transformers` output (TOKENIZER=2 and 3)
         encodings = tokenizer(
             texts,
             max_length=max_length,
@@ -165,8 +186,51 @@ def batch_tokenize(
         return {"token_ids": encodings["input_ids"]}
         
     else:
-        # This branch should now only catch actual unknown types
         raise TypeError(f"Unsupported tokenizer type: {type(tokenizer)}")
+    
+
+# Helper function for memory size
+def bytes_to_readable(total_bytes: int) -> str:
+    if total_bytes > 1024**3:   # Gigabytes
+        return f"{total_bytes / 1024**3:.2f} GB"
+    elif total_bytes > 1024**2: # Megabytes
+        return f"{total_bytes / 1024**2:.2f} MB"
+    else:                       # Kilobytes
+        return f"{total_bytes / 1024:.2f} KB"
+    
+
+# Helper function for subword metrics (copied from previous response)
+def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
+    total_words = len(sentence.split())
+    total_tokens = len(tokens)
+    if total_words == 0:
+        return 0.0, 0.0
+    fertility = total_tokens / total_words
+    split_words_count = 0
+    in_split_word = False
+    
+    if TOKEN == 1:
+        return 1.0, 0.0 # GloVe is strictly word-based
+    
+    for i, token in enumerate(tokens):
+        if TOKEN == 2: # BERT_WP
+            if token.startswith('##'):
+                if not in_split_word:
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                in_split_word = False
+                
+        elif TOKEN == 3: # GPT2_BPE
+            if i > 0 and not token.startswith('Ġ'):
+                if not in_split_word:
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                in_split_word = False
+
+    proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
+    return fertility, proportion_continued_words
 
 # ----------------------------------------------------------------------
 # 4. RNNLM MODEL DEFINITION (Modified for Flexibility)
@@ -180,12 +244,12 @@ class RNNLM(torch.nn.Module):
         # 1. Embeddings Layer
         self.embeddings = torch.nn.Embedding(vocab_size, embed_dim)
         
-        # # Initialize weights with GloVe ONLY if TOKEN=1 and size matches
-        # if vectors is not None and vectors.shape == (vocab_size, embed_dim):
-        #     rich.print("[bold cyan]Initializing Embeddings and Proj with GloVe Vectors.[/bold cyan]")
-        #     self.embeddings.weight.data = vectors
-        # else:
-        #     rich.print("[bold cyan]Randomly Initializing Embeddings/Proj (GloVe not used).[/bold cyan]")
+        # Initialize weights with GloVe ONLY if TOKEN=1 and size matches
+        if vectors is not None and vectors.shape == (vocab_size, embed_dim):
+            rich.print("[bold cyan]Initializing Embeddings and Proj with GloVe Vectors.[/bold cyan]")
+            self.embeddings.weight.data = vectors
+        else:
+            rich.print("[bold cyan]Randomly Initializing Embeddings/Proj (GloVe not used).[/bold cyan]")
 
         # 2. LSTM Layer 
         self.rnn = torch.nn.LSTM(
@@ -249,15 +313,16 @@ class RNNLM(torch.nn.Module):
 
 # load AG News, take a subset of `max_dataset_size` rows and tokenize
 dataset = datasets.load_dataset("ag_news")
-dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if \
+                                len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
 
 # Use the global `current_tokenizer`
 dataset = dataset.map(
     partial(batch_tokenize, tokenizer=current_tokenizer), 
     batched=True, 
-    num_proc=2,           # To parallelize 
+    num_proc=2, 
     batch_size=10,
-    load_from_cache_file=False 
+    load_from_cache_file=False
 )
 rich.print(dataset)
 
@@ -303,13 +368,11 @@ optimizer = torch.optim.Adam(rnn.parameters(), lr=1e-3)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING TRAINING...[/bold green]")
 
-train_loss_per_epoch = []
-test_loss_per_epoch = []
+start_time = time.time()
 
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
     
-    # Set model to training mode
     rnn.train() 
     total_loss = 0
     total_tokens = 0
@@ -341,62 +404,149 @@ for epoch in range(NUM_EPOCHS):
         optimizer.step()
         
     avg_loss = total_loss / total_tokens
-    train_loss_per_epoch.append(avg_loss)
+    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
 
-    # Testing phase at the end of each epoch
-    rnn.eval()
-    total_test_loss = 0
-    total_test_tokens = 0
-    with torch.no_grad():
-        for step, token_ids_batch in enumerate(tqdm(
-            torch.utils.data.DataLoader(
-                dataset["test"],
-                batch_size=BATCH_SIZE,
-                shuffle=False,
-                collate_fn=custom_collate_fn,
-                pin_memory=True,
-            ),
-            desc=f"Testing {epoch+1}"
-        )):
-            
-            token_ids_batch = token_ids_batch.to(DEVICE) 
-
-            # Forward Pass
-            logits = rnn(token_ids_batch)
-            
-            # Prepare Logits and Targets
-            logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-            targets = token_ids_batch[:, 1:].reshape(-1)
-            
-            # Calculate Loss
-            loss = criterion(logits_flat, targets)
-
-            # weight the loss by the number of non-PAD tokens
-            batch_tokens = (targets != PAD_IDX).sum().item()
-            total_test_loss += loss.item() * batch_tokens
-            total_test_tokens += batch_tokens
-
-    avg_test_loss = total_test_loss / total_test_tokens
-    test_loss_per_epoch.append(avg_test_loss)
-
-    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f} | Average Test Loss: {avg_test_loss:.4f}[/bold green]")
-
-# ----------------------------------------------------------------------
-# BLOCK 8: TRAINING ERROR VS BATCHES PLOTTING
-# ----------------------------------------------------------------------
-
-fig,ax = plt.subplots(figsize=(8,6), dpi=300)
-ax.plot(range(1, NUM_EPOCHS+1), train_loss_per_epoch, marker='.', linestyle='-')
-ax.plot(range(1, NUM_EPOCHS+1), test_loss_per_epoch, marker='.', linestyle='-')
-ax.legend(['Training Loss', 'Testing Loss'], fontsize=10)
-ax.set_xlabel("Epoch", fontsize=12)
-ax.set_ylabel("Average Loss per Token", fontsize=12)
-ax.grid(True)
-plt.show()
+end_time = time.time()
+total_time = end_time - start_time
 
 
 # ----------------------------------------------------------------------
-# BLOCK 9: GRADIENT VISUALIZATION TEST (Diagnostic Check)
+# NEW: TRAINING SUMMARY REPORT
+# ----------------------------------------------------------------------
+rich.print("\n" + "="*50)
+rich.print("[bold magenta]TRAINING SUMMARY REPORT (RNN)[/bold magenta]")
+rich.print(f"  Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
+rich.print(f"  Final Avg Training Loss: [yellow]{avg_loss:.4f}[/yellow]")
+rich.print("="*50 + "\n")
+
+
+# ----------------------------------------------------------------------
+# BLOCK 8: TESTING AND OBTAINING METRICS
+# ----------------------------------------------------------------------
+rich.print("[bold green]STARTING TESTING...[/bold green]")
+
+# Set model to evaluation mode
+rnn.eval()
+total_test_loss = 0
+total_test_tokens = 0
+
+# ... (Testing Loop body remains unchanged) ...
+with torch.no_grad():
+    for step, token_ids_batch in enumerate(tqdm(
+        torch.utils.data.DataLoader(
+            dataset["test"],
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            collate_fn=custom_collate_fn,
+            pin_memory=True,
+        ),
+        desc="Testing"
+    )):
+        
+        token_ids_batch = token_ids_batch.to(DEVICE) 
+
+        # Forward Pass
+        logits = rnn(token_ids_batch)
+        
+        # Prepare Logits and Targets
+        logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+        targets = token_ids_batch[:, 1:].reshape(-1)
+        
+        # Calculate Loss
+        loss = criterion(logits_flat, targets)
+
+        # weight the loss by the number of non-PAD tokens
+        batch_tokens = (targets != PAD_IDX).sum().item()
+        total_test_loss += loss.item() * batch_tokens
+        total_test_tokens += batch_tokens
+
+avg_test_loss = total_test_loss / total_test_tokens
+rich.print(f"[bold green]Testing Complete. Average Test Loss: {avg_test_loss:.4f}[/bold green]")
+
+eval_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
+
+
+# ----------------------------------------------------------------------
+# NEW: NLS AND SUBWORD FERTILITY METRICS
+# ----------------------------------------------------------------------
+rich.print("\n" + "="*50)
+rich.print("[bold blue]STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)[/bold blue]")
+
+# Count words (W) and characters (C)
+nls_word_count = len(eval_sentence.split())
+nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) 
+
+# Reference Tokenizer (for NLS_ref)
+t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
+
+# A. Tokenize with the CURRENT Tokenizer
+current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
+non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
+actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
+token_count = len(actual_tokens)
+
+rich.print(f"Tokenizer evaluation on '{eval_sentence}'")
+rich.print(f"Word Count: [green]{nls_word_count}[/green] | Char Count: [green]{nls_char_count}[/green]")
+
+# NLS_W (Subword Fertility)
+nls_w = token_count / nls_word_count
+rich.print(f"  NLS_w (Tokens per Word): [green]{nls_w:.4f}[/green]")
+
+# NLS_C
+nls_c = token_count / nls_char_count
+rich.print(f"  NLS_c (Tokens per Character): [green]{nls_c:.4f}[/green]")
+
+# NLS (Reference)
+t5_tokenization = t5_tokenizer(
+    eval_sentence,
+    max_length=100,
+    padding=False,
+    truncation=True,
+    return_attention_mask=False
+)
+t5_token_ids = t5_tokenization["input_ids"]
+t5_token_count = len(t5_token_ids)
+nls_ref = token_count / t5_token_count
+rich.print(f"  NLS (Reference T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
+
+
+# Subword Fertility and PCW
+fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
+
+rich.print("\n[bold cyan]Subword Metrics:[/bold cyan]")
+rich.print(f"  Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
+rich.print(f"  Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
+
+rich.print("[bold blue]Tokenizer Evaluation Complete.[/bold blue]")
+rich.print("="*50 + "\n")
+
+
+# ----------------------------------------------------------------------
+# NEW: MEMORY SIZE BREAKDOWN
+# ----------------------------------------------------------------------
+# Get the WTE layer (Embedding layer)
+wte_rnn = rnn.embeddings
+
+# Size of the WTE (Embedding) layer
+wte_params = wte_rnn.weight.numel() 
+total_wte = wte_params * 4        # Bytes/parameter (float32)
+
+# Total Model Size (WTE + RNN + Proj)
+total_params = sum(p.numel() for p in rnn.parameters())
+total_bytes = total_params * 4
+
+# RNN/Projection Layers Size (excluding WTE)
+total_model_layers = total_bytes - total_wte
+
+rich.print("\n" + "="*50)
+rich.print("[bold red]MODEL MEMORY SIZE BREAKDOWN[/bold red]\n")
+rich.print(f"  Total Model Size: [red]{bytes_to_readable(total_bytes)}[/red]")
+rich.print(f"  Total WTE Size: [red]{bytes_to_readable(total_wte)}[/red]")
+rich.print(f"  RNN/Projection Layers Size: [red]{bytes_to_readable(total_model_layers)}[/red]")
+rich.print("="*50 + "\n")
+
+# ----------------------------------------------------------------------
+# BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
 # ----------------------------------------------------------------------
 rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
@@ -436,7 +586,7 @@ plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
 plt.show()
 
 # ----------------------------------------------------------------------
-# BLOCK 10: ATTENTION MAP VISUALIZATION (Conceptual Check)
+# BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
 # ----------------------------------------------------------------------
 # Since the `RNNLM` does not use attention, this section is for conceptual comparison.
 
@@ -461,10 +611,10 @@ if TOKEN == 1:
 embeddings.weight.requires_grad = False
 
 # get a more natural sentence
-sentence = "Masked attention allows implementing dependency constrains between inputs and outputs."
+sentence = "Masked attention allows implementing dependency constrains between inputs and outputs"
 # Tokenize the sentence using the current tokenizer
 # Use the batch_tokenize logic for consistency and get the first result
-token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=50, tokenizer=current_tokenizer)['token_ids'][0])
+token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=15, tokenizer=current_tokenizer)['token_ids'][0])
 
 tokens = get_tokens_from_ids(token_ids, current_tokenizer)
 vectors = embeddings(token_ids)
@@ -477,7 +627,7 @@ vectors = embeddings(token_ids)
 """
 def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:bool=False, ax=None, color_bar:bool=True):
     if ax is None:
-        fig, ax = plt.subplots(figsize = (10,6), dpi=300) 
+        fig, ax = plt.subplots(figsize = (4,2), dpi=300) 
     else:
         fig = plt.gcf()
     im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
@@ -493,9 +643,6 @@ def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:
     
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-    ax.set_ylabel("$\mathbf{Q}$", fontsize=7) 
-    ax.set_xlabel("$\mathbf{K}$", fontsize=7) 
-
     if print_values:
         for i in range(len(queries_labels)):
             for j in range(len(keys_labels)):
@@ -503,7 +650,7 @@ def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:
                             ha="center", va="center", color="w", fontsize=4)
 
     if color_bar:
-      cbar = fig.colorbar(im, fraction=0.02, pad=0.04)
+      cbar = fig.colorbar(im, fraction=0.02, pad=0.04, shrink=0.7)
       cbar.ax.tick_params(labelsize=4)
       
     fig.tight_layout()
@@ -539,7 +686,7 @@ for key in masks.keys():
         masks[key] = torch.where(masks[key] == 0, 0.0, -math.inf)
 
 # visualized the log of the masked attention map
-fig, axes = plt.subplots(ncols=1+len(masks), figsize = (16,6), sharex=False, sharey=False, dpi=300)
+fig, axes = plt.subplots(ncols=1+len(masks), figsize = (8,6), sharex=False, sharey=False, dpi=300)
 
 # plot the gradient map from the RNN LM
 axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))

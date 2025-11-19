@@ -27,6 +27,7 @@ from transformers import (
 )
 from torch.utils.data import DataLoader
 import pickle
+import time
 
 
 GLOVE_PICKLE_FILE = "glove_data.pickle"
@@ -70,7 +71,7 @@ sns.set_theme()
 # ARCHITECTURE = 1: Base (GloVe-compatible/Random Init)
 # ARCHITECTURE = 2: BERT-config (Random Init)
 # ARCHITECTURE = 3: GPT-2-config (Random Init)
-ARCHITECTURE = 1
+ARCHITECTURE = 3
 
 # --- 2. Choose the Tokenization Scheme ---
 # TOKENIZER = 1: GloVe Tokenizer
@@ -178,6 +179,16 @@ def custom_collate_fn(batch):
     token_ids_list = [item['token_ids'] for item in batch]
     return torch.tensor(token_ids_list, dtype=torch.long) 
 
+def get_tokens_from_ids(token_ids, tokenizer):
+    if isinstance(tokenizer, tokenizers.Tokenizer):
+        if hasattr(tokenizer, 'get_vocabulary'):
+            vocab = tokenizer.get_vocabulary()
+            return [vocab[i] for i in token_ids]
+        else:
+            return [str(i) for i in token_ids] 
+    elif isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)): 
+        return tokenizer.convert_ids_to_tokens(token_ids.tolist())
+    return [str(i) for i in token_ids]
 
 def batch_tokenize(
     batch: List[Dict[str, Any]], 
@@ -264,6 +275,8 @@ optimizer = torch.optim.Adam(current_model.parameters(), lr=1e-5)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING FINE-TUNING...[/bold green]")
 
+start_time = time.time()
+
 #   Set model to training mode
 current_model.train()
 
@@ -305,39 +318,47 @@ for epoch in range(NUM_EPOCHS):
 #   Set model back to evaluation for visualization blocks
 current_model.eval()
 
+total_time = time.time() - start_time
+print(f"\nTotal time for training model: {total_time} s")
+
+
+# Use the same sentence from the attention map visualization, as to evaluate the token's metrics
+eval_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
+rich.print(f"\nTokenizer evaluation on '{eval_sentence}'")
+
 # ----------------------------------------------------------------------
 #   NORMALIZED LENGTH SCORE (NLS) EVALUATION
 # ----------------------------------------------------------------------
 
-rich.print("\n[bold yellow]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold yellow]\n")
-
-# Use the same sentence from the attention map visualization
-nls_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
+rich.print("\n[bold blue]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold blue]\n")
+""" The higher the NLS value, the worse the option is, in principle. """
 
 # Count words (W) and characters (C)
-nls_word_count = len(nls_sentence.split())
-nls_char_count = len(nls_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
+nls_word_count = len(eval_sentence.split())
+nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
 
 # We use a known efficient tokenizer like Llama for the NLS (Reference) metric
 t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
 
 # A. Tokenize with the CURRENT Tokenizer
-current_tokenizer_ids = batch_tokenize({"text": [nls_sentence]}, max_length=100, tokenizer=current_tokenizer)['token_ids'][0]
-current_token_count = len([id for id in current_tokenizer_ids if id != PAD_IDX])
+current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
+non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
+actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
 
 # B. Calculate NLS_W (Word-Normalized Length)
-nls_w = current_token_count / nls_word_count
-rich.print(f"NLS_w: {nls_w:.4f} (Tokens per Word)")
+token_count = len(actual_tokens)
+nls_w = token_count / nls_word_count
+rich.print(f"NLS_w: [green]{nls_w:.4f}[/green] (Tokens per Word)")
 
 # C. Calculate NLS_C (Character-Normalized Length)
-nls_c = current_token_count / nls_char_count
-rich.print(f"NLS_c: {nls_c:.4f} (Tokens per Character)")
+nls_c = token_count / nls_char_count
+rich.print(f"NLS_c: [green]{nls_c:.4f}[/green] (Tokens per Character)")
 
 # D. Calculate NLS (Reference)
 if t5_tokenizer is not None:
     # Tokenize with the REFERENCE Tokenizer
     t5_tokenization = t5_tokenizer(
-        nls_sentence,
+        eval_sentence,
         max_length=100,
         padding=False,
         truncation=True,
@@ -348,12 +369,86 @@ if t5_tokenizer is not None:
     t5_token_count = len(t5_token_ids)
     
     # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
-    nls_ref = current_token_count / t5_token_count
+    nls_ref = token_count / t5_token_count
 
-    rich.print(f"[bold yellow]NLS (Reference: T/R): {nls_ref:.4f}[/bold yellow] (Efficiency vs. t5)")
+    rich.print(f"NLS (Reference: T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
 
 
-rich.print("\n[bold yellow]NLS Evaluation Complete.[/bold yellow]")
+rich.print("\n[bold blue]NLS Evaluation Complete.[/bold blue]")
+
+# ----------------------------------------------------------------------
+#   SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION
+# ----------------------------------------------------------------------
+
+rich.print("\n[bold blue]STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...[/bold blue]\n")
+
+"""
+    The subword fertility evaluates the amount of tokens generated per word. A fertility of 1.0 is
+    ideal. Normally, the SF value is >= 1.0
+
+    Another metric that is employed is the proportion of continued words which indicates the percentage
+    of words that are split into multiple tokens. 0 is an ideal value for the CW proportion.
+"""
+
+def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
+    # Count words using simple space splitting (as per standard practice for these metrics)
+    total_words = len(sentence.split())
+    total_tokens = len(tokens)
+    
+    if total_words == 0:
+        return 0.0, 0.0
+        
+    fertility = total_tokens / total_words
+    
+    #   Calculate Proportion of Continued Words (PCW)
+    split_words_count = 0
+    in_split_word = False
+    
+    # Check for GloVe/Word-based tokenizer
+    if token_settings['name'] == 'GloVe':
+        # GloVe is strictly word-based, so no words are split (Fertility = 1.0, PCW = 0.0)
+        return 1.0, 0.0
+    
+    for i, token in enumerate(tokens):
+        if token_settings['name'] == 'BERT_WP':
+            if token.startswith('##'):
+                # Token is a continuation of a previous word
+                if not in_split_word:
+                    # Found the first continuation token for a split word
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                # Token is a new word (or the start of a split word)
+                in_split_word = False
+                
+        elif token_settings['name'] == 'GPT2_BPE':
+            # Check for the space marker 'Ġ' (which signifies the start of a new word)
+            if i > 0 and not token.startswith('Ġ'):
+                # Token is a continuation of the previous word
+                if not in_split_word:
+                    # Found the first continuation token for a split word
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                # Token is a new word (or the first token of the sequence)
+                in_split_word = False
+
+    #   PCW = (Number of split words) / (Total number of words)
+    proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
+    
+    # Note: Split words count in this methodology starts counting *after* the initial word part
+    # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
+    
+    return fertility, proportion_continued_words
+
+
+fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
+
+rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
+rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
+
+rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
+
 
 # ----------------------------------------------------------------------
 #   GRADIENT VISUALIZATION TEST
@@ -410,6 +505,34 @@ if wte is not None:
     plt.ylabel("$t'$ (loss)",fontsize=10)
     plt.title(f"Gradient Magnitude (Arch: {arch_settings['name']}, Token: {token_settings['name']})",fontsize=16)
     plt.show()
+
+    #   -----------------------------------------------------------------------------
+
+    #   Get the size of the WTE for comparison (LUT table)
+    wte_params = wte.weight.numel() 
+    total_wte = wte_params * 4        #   Bytes/parameter (float32)
+
+    #   Get the size related to the MODEL and WTE together (obtain parameters' amount & related B size)
+    total_params = sum(p.numel() for p in current_model.parameters())
+    total_bytes = total_params * 4
+    total_model = total_bytes - total_wte
+
+    def bytes_size(total_bytes):
+        if total_bytes > 1024**3:   # Gigabytes
+            readable_size = f"{total_bytes / 1024**3:.2f} GB"
+        elif total_bytes > 1024**2: # Megabytes
+            readable_size = f"{total_bytes / 1024**2:.2f} MB"
+        else:                       # Kilobytes
+            readable_size = f"{total_bytes / 1024:.2f} KB"
+
+        return readable_size
+    
+    tot_bytes_size = bytes_size(total_bytes)
+    wte_size = bytes_size(total_wte)
+    model_size = bytes_size(total_model)
+    print(f"\nTOTAL SIZE OF CHOSEN OPTION: MODEL (parameters) + TOKENIZER (WTE size): {tot_bytes_size}")
+    print(f"TOTAL SIZE OF TRANSFORMER LAYERS (excluding WTE): {model_size}")
+    print(f"TOTAL WTE SIZE (vector matrix size): {wte_size}\n")
 else:
     rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
 
@@ -418,17 +541,6 @@ else:
 # ----------------------------------------------------------------------
 
 rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
-
-def get_tokens_from_ids(token_ids, tokenizer):
-    if isinstance(tokenizer, tokenizers.Tokenizer):
-        if hasattr(tokenizer, 'get_vocabulary'):
-            vocab = tokenizer.get_vocabulary()
-            return [vocab[i] for i in token_ids]
-        else:
-            return [str(i) for i in token_ids] 
-    elif isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)): 
-        return tokenizer.convert_ids_to_tokens(token_ids.tolist())
-    return [str(i) for i in token_ids]
 
 #   get a more natural sentence
 sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
