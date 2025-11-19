@@ -1,3 +1,4 @@
+from itertools import islice
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -114,8 +115,8 @@ else:
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
-NUM_EPOCHS = 10
-max_dataset_size = 1000
+NUM_EPOCHS = 8
+max_dataset_size = 100000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -311,14 +312,50 @@ class RNNLM(torch.nn.Module):
 # 5. DATASET PREPARATION
 # ----------------------------------------------------------------------
 
-# load AG News, take a subset of `max_dataset_size` rows and tokenize
-dataset = datasets.load_dataset("ag_news")
-dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if \
-                                len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+# Dataset options:
+
+# 1: AG News dataset
+# 2: Tiny Shakespeare dataset
+# 3: FineWeb2 dataset
+
+DATASET_OPTION = 1
+
+if DATASET_OPTION == 1:
+    rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
+    # load AG News, take a subset of `max_dataset_size` rows and tokenize
+    dataset = datasets.load_dataset("ag_news")
+    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+elif DATASET_OPTION == 2:
+    rich.print(f"[bold blue]Using Tiny Shakespeare Dataset: {max_dataset_size} samples[/bold blue]")
+    dataset = datasets.load_dataset("Trelis/tiny-shakespeare")
+    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+elif DATASET_OPTION == 3:
+    rich.print(f"[bold blue]Using FineWeb2 Dataset: {max_dataset_size} samples[/bold blue]")
+    splits = ["train", "test"]
+    filtered_dict = {}
+    for split in splits:
+        # Load FineWeb2 as IterableDataset for each split
+        fineweb_list = list(islice(datasets.load_dataset(
+            "HuggingFaceFW/fineweb-2",
+            name="spa_Latn",
+            split=split,
+            streaming=True
+        ), max_dataset_size))
+        
+        # Filter only the 'text' field
+        filtered = [{"text": row["text"]} for row in fineweb_list]
+        
+        # Build the Dataset for that split
+        filtered_dict[split] = datasets.Dataset.from_list(filtered)
+
+    # Build the final DatasetDict with both splits
+    dataset = datasets.DatasetDict(filtered_dict)
+else:
+    raise ValueError(f"Invalid DATASET_OPTION: {DATASET_OPTION}. Must be 1, 2, or 3.")
 
 # Use the global `current_tokenizer`
 dataset = dataset.map(
-    partial(batch_tokenize, tokenizer=current_tokenizer), 
+    partial(batch_tokenize, tokenizer=current_tokenizer, key = "Text" if DATASET_OPTION == 2 else "text"), 
     batched=True, 
     num_proc=2, 
     batch_size=10,
