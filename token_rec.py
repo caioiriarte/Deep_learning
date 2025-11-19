@@ -66,7 +66,7 @@ sns.set_theme()
 # TOKEN = 1: Original GloVe Tokenizer
 # TOKEN = 2: HuggingFace WordPiece (BERT-base-uncased)
 # TOKEN = 3: HuggingFace BPE (GPT-2)
-TOKEN = 1
+TOKEN = 3
 
 # Global variables for conditional model setup
 current_tokenizer = None
@@ -113,8 +113,8 @@ else:
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
-NUM_EPOCHS = 10
-max_dataset_size = 1000
+NUM_EPOCHS = 8
+max_dataset_size = 1000000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -180,12 +180,12 @@ class RNNLM(torch.nn.Module):
         # 1. Embeddings Layer
         self.embeddings = torch.nn.Embedding(vocab_size, embed_dim)
         
-        # Initialize weights with GloVe ONLY if TOKEN=1 and size matches
-        if vectors is not None and vectors.shape == (vocab_size, embed_dim):
-            rich.print("[bold cyan]Initializing Embeddings and Proj with GloVe Vectors.[/bold cyan]")
-            self.embeddings.weight.data = vectors
-        else:
-            rich.print("[bold cyan]Randomly Initializing Embeddings/Proj (GloVe not used).[/bold cyan]")
+        # # Initialize weights with GloVe ONLY if TOKEN=1 and size matches
+        # if vectors is not None and vectors.shape == (vocab_size, embed_dim):
+        #     rich.print("[bold cyan]Initializing Embeddings and Proj with GloVe Vectors.[/bold cyan]")
+        #     self.embeddings.weight.data = vectors
+        # else:
+        #     rich.print("[bold cyan]Randomly Initializing Embeddings/Proj (GloVe not used).[/bold cyan]")
 
         # 2. LSTM Layer 
         self.rnn = torch.nn.LSTM(
@@ -303,6 +303,9 @@ optimizer = torch.optim.Adam(rnn.parameters(), lr=1e-3)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING TRAINING...[/bold green]")
 
+train_loss_per_epoch = []
+test_loss_per_epoch = []
+
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
     
@@ -338,52 +341,62 @@ for epoch in range(NUM_EPOCHS):
         optimizer.step()
         
     avg_loss = total_loss / total_tokens
-    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
+    train_loss_per_epoch.append(avg_loss)
+
+    # Testing phase at the end of each epoch
+    rnn.eval()
+    total_test_loss = 0
+    total_test_tokens = 0
+    with torch.no_grad():
+        for step, token_ids_batch in enumerate(tqdm(
+            torch.utils.data.DataLoader(
+                dataset["test"],
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+            ),
+            desc=f"Testing {epoch+1}"
+        )):
+            
+            token_ids_batch = token_ids_batch.to(DEVICE) 
+
+            # Forward Pass
+            logits = rnn(token_ids_batch)
+            
+            # Prepare Logits and Targets
+            logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+            targets = token_ids_batch[:, 1:].reshape(-1)
+            
+            # Calculate Loss
+            loss = criterion(logits_flat, targets)
+
+            # weight the loss by the number of non-PAD tokens
+            batch_tokens = (targets != PAD_IDX).sum().item()
+            total_test_loss += loss.item() * batch_tokens
+            total_test_tokens += batch_tokens
+
+    avg_test_loss = total_test_loss / total_test_tokens
+    test_loss_per_epoch.append(avg_test_loss)
+
+    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f} | Average Test Loss: {avg_test_loss:.4f}[/bold green]")
 
 # ----------------------------------------------------------------------
-# BLOCK 8: TESTING AND OBTAINING METRICS
+# BLOCK 8: TRAINING ERROR VS BATCHES PLOTTING
 # ----------------------------------------------------------------------
-rich.print("[bold green]STARTING TESTING...[/bold green]")
 
-# Set model to evaluation mode
-rnn.eval()
-total_test_loss = 0
-total_test_tokens = 0
+fig,ax = plt.subplots(figsize=(8,6), dpi=300)
+ax.plot(range(1, NUM_EPOCHS+1), train_loss_per_epoch, marker='.', linestyle='-')
+ax.plot(range(1, NUM_EPOCHS+1), test_loss_per_epoch, marker='.', linestyle='-')
+ax.legend(['Training Loss', 'Testing Loss'], fontsize=10)
+ax.set_xlabel("Epoch", fontsize=12)
+ax.set_ylabel("Average Loss per Token", fontsize=12)
+ax.grid(True)
+plt.show()
 
-with torch.no_grad():
-    for step, token_ids_batch in enumerate(tqdm(
-        torch.utils.data.DataLoader(
-            dataset["test"],
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-            pin_memory=True,
-        ),
-        desc="Testing"
-    )):
-        
-        token_ids_batch = token_ids_batch.to(DEVICE) 
-
-        # Forward Pass
-        logits = rnn(token_ids_batch)
-        
-        # Prepare Logits and Targets
-        logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-        targets = token_ids_batch[:, 1:].reshape(-1)
-        
-        # Calculate Loss
-        loss = criterion(logits_flat, targets)
-
-        # weight the loss by the number of non-PAD tokens
-        batch_tokens = (targets != PAD_IDX).sum().item()
-        total_test_loss += loss.item() * batch_tokens
-        total_test_tokens += batch_tokens
-
-avg_test_loss = total_test_loss / total_test_tokens
-rich.print(f"[bold green]Testing Complete. Average Test Loss: {avg_test_loss:.4f}[/bold green]")
 
 # ----------------------------------------------------------------------
-# BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
+# BLOCK 9: GRADIENT VISUALIZATION TEST (Diagnostic Check)
 # ----------------------------------------------------------------------
 rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
@@ -423,7 +436,7 @@ plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
 plt.show()
 
 # ----------------------------------------------------------------------
-# BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
+# BLOCK 10: ATTENTION MAP VISUALIZATION (Conceptual Check)
 # ----------------------------------------------------------------------
 # Since the `RNNLM` does not use attention, this section is for conceptual comparison.
 
