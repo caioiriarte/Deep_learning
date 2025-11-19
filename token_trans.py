@@ -70,7 +70,7 @@ sns.set_theme()
 # ARCHITECTURE = 1: Base (GloVe-compatible/Random Init)
 # ARCHITECTURE = 2: BERT-config (Random Init)
 # ARCHITECTURE = 3: GPT-2-config (Random Init)
-ARCHITECTURE = 3
+ARCHITECTURE = 1
 
 # --- 2. Choose the Tokenization Scheme ---
 # TOKENIZER = 1: GloVe Tokenizer
@@ -159,7 +159,7 @@ current_model.eval()
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 4
-NUM_EPOCHS = 40
+NUM_EPOCHS = 10
 max_dataset_size = 512
 max_seq_size = 50 
 rich.print(f"Device: [red]{DEVICE}[/red] | Model Class: [red]{current_model.__class__.__name__}[/red] \
@@ -311,20 +311,15 @@ current_model.eval()
 
 rich.print("\n[bold yellow]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold yellow]\n")
 
-# --- 1. Define Constant Test Sentence ---
 # Use the same sentence from the attention map visualization
 nls_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
 
-# --- 2. Calculate Baseline Metrics (Constant) ---
 # Count words (W) and characters (C)
 nls_word_count = len(nls_sentence.split())
 nls_char_count = len(nls_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
 
-# --- 3. Setup Reference Tokenizer (Llama 3 8B) ---
 # We use a known efficient tokenizer like Llama for the NLS (Reference) metric
-llama_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", use_fast=True)
-
-# --- 4. Tokenize and Calculate NLS Metrics ---
+t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
 
 # A. Tokenize with the CURRENT Tokenizer
 current_tokenizer_ids = batch_tokenize({"text": [nls_sentence]}, max_length=100, tokenizer=current_tokenizer)['token_ids'][0]
@@ -338,11 +333,10 @@ rich.print(f"NLS_w: {nls_w:.4f} (Tokens per Word)")
 nls_c = current_token_count / nls_char_count
 rich.print(f"NLS_c: {nls_c:.4f} (Tokens per Character)")
 
-
 # D. Calculate NLS (Reference)
-if llama_tokenizer is not None:
+if t5_tokenizer is not None:
     # Tokenize with the REFERENCE Tokenizer
-    llama_tokenization = llama_tokenizer(
+    t5_tokenization = t5_tokenizer(
         nls_sentence,
         max_length=100,
         padding=False,
@@ -350,13 +344,13 @@ if llama_tokenizer is not None:
         return_attention_mask=False
     )
     # Exclude special tokens like BOS/EOS/Pad if they were included
-    llama_token_ids = llama_tokenization["input_ids"]
-    llama_token_count = len(llama_token_ids)
+    t5_token_ids = t5_tokenization["input_ids"]
+    t5_token_count = len(t5_token_ids)
     
     # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
-    nls_ref = current_token_count / llama_token_count
+    nls_ref = current_token_count / t5_token_count
 
-    rich.print(f"[bold yellow]NLS (Reference: T/R): {nls_ref:.4f}[/bold yellow] (Efficiency vs. Llama)")
+    rich.print(f"[bold yellow]NLS (Reference: T/R): {nls_ref:.4f}[/bold yellow] (Efficiency vs. t5)")
 
 
 rich.print("\n[bold yellow]NLS Evaluation Complete.[/bold yellow]")
@@ -437,10 +431,14 @@ def get_tokens_from_ids(token_ids, tokenizer):
     return [str(i) for i in token_ids]
 
 #   get a more natural sentence
-sentence = "A dog is a stunning mammal from the animal kingdom and also considered the best friend of men"
+sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
 
 #   Tokenize the sentence 
-token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=50, tokenizer=current_tokenizer)['token_ids'][0])
+full_token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=25, tokenizer=current_tokenizer)['token_ids'][0])
+token_ids_list = [id for id in full_token_ids if id != PAD_IDX]
+token_ids = torch.tensor(token_ids_list) 
+
+# Get token names only for the actual content
 tokens = get_tokens_from_ids(token_ids, current_tokenizer)
 
 #   Pass the input to the model to get attention weights
