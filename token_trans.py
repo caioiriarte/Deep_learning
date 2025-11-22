@@ -1,6 +1,6 @@
 import os
+from sklearn.pipeline import islice
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 import torch
 from torch import nn
 import math
@@ -9,6 +9,8 @@ from pathlib import Path
 from tqdm import tqdm
 import rich
 from typing import List, Tuple, Dict, Any, Union
+import matplotlib
+matplotlib.use('TkAgg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
@@ -28,6 +30,8 @@ from transformers import (
 from torch.utils.data import DataLoader
 import pickle
 import time
+
+from byte_level_tokenizer import ByteLevelTokenizer
 
 
 GLOVE_PICKLE_FILE = "glove_data.pickle"
@@ -77,6 +81,7 @@ ARCHITECTURE = 3
 # TOKENIZER = 1: GloVe Tokenizer
 # TOKENIZER = 2: BERT WordPiece Tokenizer
 # TOKENIZER = 3: GPT-2 BPE Tokenizer
+# TOKEN = 4: Byte-level encoding
 TOKENIZER = 3
 
 # Configuration mapping for architectures
@@ -91,6 +96,7 @@ TOKEN_CONFIGS = {
     1: {"name": "GloVe", "hf_name": None},
     2: {"name": "BERT_WP", "hf_name": "bert-base-uncased"},
     3: {"name": "GPT2_BPE", "hf_name": "gpt2"},
+    4: {"name": "ByteLevel", "hf_name": None},
 }
 
 # Global variables
@@ -127,20 +133,31 @@ if TOKENIZER == 1:
     rich.print(f"[bold yellow]Using fixed GloVe Vocab Size: {glove_vocab_size}[/bold yellow]")
     current_vocab_size = glove_vocab_size
     
+elif TOKENIZER == 4:
+    rich.print("[bold red]Using TOKENIZER 4: Byte-level encoding[/bold red]")
+    current_tokenizer = ByteLevelTokenizer()
+    current_vocab_size = current_tokenizer.vocab_size   # 258 by default
+    current_embed_dim = 300
+    PAD_IDX = current_tokenizer.pad_token_id
 else:
     # BERT or GPT-2 Tokenizer (HF Vocab)
     current_tokenizer = AutoTokenizer.from_pretrained(token_hf_name)
     current_vocab_size = current_tokenizer.vocab_size
     if TOKENIZER == 2:      # BERT
+        rich.print("[bold red]Using TOKENIZER 2: HuggingFace WordPiece (BERT-base-uncased)[/bold red]")
         PAD_IDX = current_tokenizer.pad_token_id or current_tokenizer.unk_token_id
     elif TOKENIZER == 3:    # GPT-2
+        rich.print("[bold red]Using TOKENIZER 3: HuggingFace BPE (GPT-2)[/bold red]")
         current_tokenizer.pad_token = current_tokenizer.eos_token 
         PAD_IDX = current_tokenizer.pad_token_id
+    else:
+        raise ValueError(f"Invalid TOKEN value: {TOKENIZER}. Must be 1, 2, 3, or 4.")
+
 
 #   MODEL SETUP (Weights)
 config = AutoConfig.from_pretrained(arch_name) 
 config.vocab_size = current_vocab_size 
-config.hidden_size = 240                    #   Must be multiple of 12
+config.hidden_size = 240                    #   Must be multiple of 12 (number of attention heads)
 config.num_hidden_layers = 6                #   Down from 12 (BERT-base)
 config.intermediate_size = 1024             #   Must be adjusted proportionally
 
@@ -152,17 +169,16 @@ rich.print(f"[bold red]{arch_settings['name']}: Using RANDOM weights (vocab size
 
 
 current_embed_dim = current_model.config.hidden_size
-current_model.eval()
 
 # ----------------------------------------------------------------------
 #   CONSTANTS AND DEVICE
 # ----------------------------------------------------------------------
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-BATCH_SIZE = 4
-NUM_EPOCHS = 10
-max_dataset_size = 512
-max_seq_size = 50 
+BATCH_SIZE = 8
+NUM_EPOCHS = 1
+max_dataset_size = 100000
+max_seq_size = 10 
 rich.print(f"Device: [red]{DEVICE}[/red] | Model Class: [red]{current_model.__class__.__name__}[/red] \
 Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -170,6 +186,9 @@ Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim
 transformers.logging.set_verbosity_error()
 datasets.logging.set_verbosity_error()
 
+# ----------------------------------------------------------------------
+#   HELPER FUNCTIONS
+# ----------------------------------------------------------------------
 
 def custom_collate_fn(batch):
     """
@@ -223,22 +242,83 @@ def batch_tokenize(
             return_attention_mask=False
         )
         return {"token_ids": encodings["input_ids"]}
+    
+    elif isinstance(tokenizer, ByteLevelTokenizer):
+        enc = tokenizer(
+            texts,
+            max_length=max_length,
+            padding=True,
+            truncation=True,
+            return_attention_mask=False,
+        )
+        token_ids = enc["input_ids"]
+        return {"token_ids": token_ids}
         
     else:
         raise TypeError(f"Unsupported tokenizer type: {type(tokenizer)}")
+
+def count_chars(sample, key):
+    # Save text
+    text = sample[key]
+    # preprocess text by removing spaces and commas
+    text = text.replace(" ", "").replace(",", "")
+    return len(text)
+
+def count_bytes(sample, key, encoding="utf-8"):
+    """
+    Counts the number of bytes in the given text sample when encoded with the specified encoding.
+    """
+    text = sample[key]
+    text = text.replace(" ", "").replace(",", "")
+    return len(text.encode(encoding))
 
 # ----------------------------------------------------------------------
 #   DATASET PREPARATION
 # ----------------------------------------------------------------------
 
-# load AG News, take a subset of `max_dataset_size` rows and tokenize
-dataset = datasets.load_dataset("ag_news")
-dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if \
-                                len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+# Dataset options:
+
+# 1: AG News dataset
+# 2: Tiny Shakespeare dataset
+# 3: FineWeb2 dataset
+DATASET_OPTION = 3
+
+if DATASET_OPTION == 1:
+    rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
+    # load AG News, take a subset of `max_dataset_size` rows and tokenize
+    dataset = datasets.load_dataset("ag_news")
+    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+elif DATASET_OPTION == 2:
+    rich.print(f"[bold blue]Using Tiny Shakespeare Dataset: {max_dataset_size} samples[/bold blue]")
+    dataset = datasets.load_dataset("Trelis/tiny-shakespeare")
+    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+elif DATASET_OPTION == 3:
+    rich.print(f"[bold blue]Using FineWeb2 Dataset: {max_dataset_size} samples[/bold blue]")
+    splits = ["train", "test"]
+    filtered_dict = {}
+    for split in splits:
+        # Load FineWeb2 as IterableDataset for each split
+        fineweb_list = list(islice(datasets.load_dataset(
+            "HuggingFaceFW/fineweb-2",
+            name="spa_Latn",
+            split=split,
+            streaming=True
+        ), max_dataset_size))
+        
+        # Filter only the 'text' field
+        filtered = [{"text": row["text"]} for row in fineweb_list]
+        
+        # Build the Dataset for that split
+        filtered_dict[split] = datasets.Dataset.from_list(filtered)
+
+    # Build the final DatasetDict with both splits
+    dataset = datasets.DatasetDict(filtered_dict)
+else:
+    raise ValueError(f"Invalid DATASET_OPTION: {DATASET_OPTION}. Must be 1, 2, or 3.")
 
 # Use the global `current_tokenizer`
 dataset = dataset.map(
-    partial(batch_tokenize, tokenizer=current_tokenizer), 
+    partial(batch_tokenize, tokenizer=current_tokenizer, key = "Text" if DATASET_OPTION == 2 else "text"), 
     batched=True, 
     num_proc=2, 
     batch_size=10,
@@ -275,15 +355,39 @@ optimizer = torch.optim.Adam(current_model.parameters(), lr=1e-5)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING FINE-TUNING...[/bold green]")
 
-start_time = time.time()
 
-#   Set model to training mode
-current_model.train()
+# Pre-calculate total characters in test set for BPC calculation
+total_test_chars = sum(
+    count_chars(sample, key="Text" if DATASET_OPTION == 2 else "text")
+    for sample in dataset["test"]
+)
+total_test_bytes = sum(
+    count_bytes(sample, key="Text" if DATASET_OPTION == 2 else "text")
+    for sample in dataset["test"]
+)
+total_test_bits = total_test_bytes * 8 # assuming 8 bits per byte
+
+# Prepare the full test text for compression baselines
+test_text = "".join(
+    sample["Text" if DATASET_OPTION == 2 else "text"].replace(" ", "").replace(",", "")
+    for sample in dataset["test"]
+)
+test_text_bytes = test_text.encode("utf-8")
+
+start_time = time.time()
+accumulated_testing_duration = 0.0 # to track total testing time
+
+
+train_loss_per_epoch = []
+test_loss_per_epoch = []
 
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
     
+    #   Set model to training mode
+    current_model.train()
     total_loss = 0
+    total_tokens = 0
     
     for step, token_ids_batch in enumerate(tqdm(train_dataloader, desc=f"Epoch {epoch+1}")):
         
@@ -306,20 +410,122 @@ for epoch in range(NUM_EPOCHS):
         
         # 4. Calculate Loss
         loss = criterion(logits_flat, targets)
-        total_loss += loss.item()
 
+        # weight the loss by the number of non-PAD tokens
+        batch_tokens = (targets != PAD_IDX).sum().item()
+        total_loss += loss.item() * batch_tokens
+        total_tokens += batch_tokens
+        
         # 5. Backward Pass and Optimization
         loss.backward()
         optimizer.step()
         
-    avg_loss = total_loss / len(train_dataloader)
-    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
+    avg_loss = total_loss / total_tokens
+    train_loss_per_epoch.append(avg_loss)
 
-#   Set model back to evaluation for visualization blocks
-current_model.eval()
 
-total_time = time.time() - start_time
-print(f"\nTotal time for training model: {total_time} s")
+    # TESTING PHASE at the end of each epoch
+    # Do not time testing phase
+    start_testing_time = time.time()
+
+    current_model.eval()
+    total_test_loss = 0
+    total_test_tokens = 0
+    total_entropy_nats = 0.0 
+    with torch.no_grad():
+        for step, token_ids_batch in enumerate(tqdm(
+            torch.utils.data.DataLoader(
+                dataset["test"],
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+            ),
+            desc=f"Testing {epoch+1}"
+        )):
+            
+            token_ids_batch = token_ids_batch.to(DEVICE) 
+
+            # Forward Pass
+            outputs = current_model(token_ids_batch)
+            logits = outputs.logits
+            
+            # Prepare Logits and Targets
+            logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+            targets = token_ids_batch[:, 1:].reshape(-1)
+            
+            # --------------------------------------------------------------
+            # 1) NLL (Cross-entropy) 
+            loss = criterion(logits_flat, targets)
+
+            # weight the loss by the number of non-PAD tokens
+            batch_tokens = (targets != PAD_IDX).sum().item()
+            total_test_loss += loss.item() * batch_tokens
+            total_test_tokens += batch_tokens
+            # --------------------------------------------------------------
+            # 2) ENTROPY RATE: H(p(.|context)) in nats
+            #    H(p) = - sum_v p_v log p_v
+            log_probs = torch.log_softmax(logits_flat, dim=-1)        # (N, V)
+            probs = log_probs.exp()                                   # (N, V)
+
+            entropy_per_position = -(probs * log_probs).sum(dim=-1)   # (N,), in nats
+
+            # Only consider non-PAD tokens for entropy calculation
+            non_pad_mask = (targets != PAD_IDX)
+            entropy_valid = entropy_per_position[non_pad_mask]
+
+            total_entropy_nats += entropy_valid.sum().item()
+
+    avg_test_loss = total_test_loss / total_test_tokens
+    test_loss_per_epoch.append(avg_test_loss)
+
+    # BITS PER CHARACTER (BPC) CALCULATION
+    #---------------------------------------
+    total_test_nll_nats = total_test_loss
+    # Convert to bits
+    total_test_nll_bits = total_test_nll_nats / math.log(2.0)
+    # BPC = total bits / nº of characters in test set
+    test_bpc = total_test_nll_bits / total_test_chars
+    #---------------------------------------
+    # BITS PER BYTE (BPB) CALCULATION
+    bpb_model = total_test_nll_bits / total_test_bytes
+    #---------------------------------------
+    # COMPRESSION RATIO ESTIMATION
+    # Assuming 8 bits per byte in original text
+    compression_ratio_model = total_test_nll_bits / total_test_bits
+    #---------------------------------------
+    # NLL per char
+    nll_per_char_nats = total_test_loss / total_test_chars
+    #---------------------------------------
+    # ENTROPY RATE per char
+    entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
+    entropy_rate_bits_per_token = entropy_rate_nats_per_token / math.log(2.0)
+
+    # Convert to "per character" using the total number of characters in the test corpus
+    entropy_rate_bits_per_char = (total_entropy_nats / math.log(2.0)) / total_test_chars
+    #---------------------------------------
+
+    # SUMMARY OF EPOCH
+    rich.print(
+        f"[bold green]Epoch {epoch+1} Complete."
+        # f" Avg Train Loss: {avg_loss:.4f}"
+        # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
+        f" | Avg Test NLL/char: {nll_per_char_nats:.4f} nats/char"
+        f" | Test BPC: {test_bpc:.4f} bits/char"
+        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
+        f" | Test BPB: {bpb_model:.4f} bits/byte"
+        f" | Compression Ratio: {compression_ratio_model:.4f}[/bold green]"
+        # f" | Entropy Rate: {entropy_rate_bits_per_token:.4f} bits/token"
+    )
+
+    # CALCULATE TESTING DURATION
+    end_testing_time = time.time()
+    testing_duration = end_testing_time - start_testing_time
+    accumulated_testing_duration += testing_duration
+
+end_time = time.time()
+total_time = end_time - start_time - accumulated_testing_duration # exclude testing time
+rich.print(f"Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
 
 
 # Use the same sentence from the attention map visualization, as to evaluate the token's metrics
@@ -530,9 +736,12 @@ if wte is not None:
     tot_bytes_size = bytes_size(total_bytes)
     wte_size = bytes_size(total_wte)
     model_size = bytes_size(total_model)
-    print(f"\nTOTAL SIZE OF CHOSEN OPTION: MODEL (parameters) + TOKENIZER (WTE size): {tot_bytes_size}")
-    print(f"TOTAL SIZE OF TRANSFORMER LAYERS (excluding WTE): {model_size}")
-    print(f"TOTAL WTE SIZE (vector matrix size): {wte_size}\n")
+    rich.print("\n" + "="*50)
+    rich.print("[bold red]MODEL MEMORY SIZE BREAKDOWN[/bold red]")
+    rich.print(f"TOTAL SIZE OF CHOSEN OPTION: MODEL (parameters) + TOKENIZER (WTE size): [red]{tot_bytes_size}[/red]")
+    rich.print(f"TOTAL SIZE OF TRANSFORMER LAYERS (excluding WTE):[red] {model_size}[/red]")
+    rich.print(f"TOTAL WTE SIZE (vector matrix size):[red] {wte_size}[/red]")
+    rich.print("="*50 + "\n")
 else:
     rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
 

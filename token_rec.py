@@ -594,10 +594,10 @@ for epoch in range(NUM_EPOCHS):
         # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
         f" | Avg Test NLL/char: {nll_per_char_nats:.4f} nats/char"
         f" | Test BPC: {test_bpc:.4f} bits/char"
+        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
         f" | Test BPB: {bpb_model:.4f} bits/byte"
-        f" | Compression Ratio: {compression_ratio_model:.4f}"
+        f" | Compression Ratio: {compression_ratio_model:.4f}[/bold green]"
         # f" | Entropy Rate: {entropy_rate_bits_per_token:.4f} bits/token"
-        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char[/bold green]"
     )
 
     # CALCULATE TESTING DURATION
