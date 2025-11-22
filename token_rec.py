@@ -22,7 +22,12 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from torch.utils.data import DataLoader
 import pickle
 import time
+import math
+import gzip
+import bz2
+import lzma
 
+from byte_level_tokenizer import ByteLevelTokenizer
 
 ## LOAD OR SAVE GLOVE DATA
 GLOVE_PICKLE_FILE = "glove_data.pickle"
@@ -68,7 +73,8 @@ sns.set_theme()
 # TOKEN = 1: Original GloVe Tokenizer
 # TOKEN = 2: HuggingFace WordPiece (BERT-base-uncased)
 # TOKEN = 3: HuggingFace BPE (GPT-2)
-TOKEN = 2
+# TOKEN = 4: Byte-level encoding
+TOKEN = 4
 
 # Global variables for conditional model setup
 current_tokenizer = None
@@ -106,8 +112,16 @@ elif TOKEN == 3:
     current_tokenizer.pad_token = current_tokenizer.eos_token 
     PAD_IDX = current_tokenizer.pad_token_id
 
+elif TOKEN == 4:
+    rich.print("[bold red]Using TOKENIZER 4: Byte-level encoding[/bold red]")
+    current_tokenizer = ByteLevelTokenizer()
+    current_vocab_size = current_tokenizer.vocab_size   # 258 by default
+    current_embed_dim = 300
+    PAD_IDX = current_tokenizer.pad_token_id
+
+
 else:
-    raise ValueError(f"Invalid TOKEN value: {TOKEN}. Must be 1, 2, or 3.")
+    raise ValueError(f"Invalid TOKEN value: {TOKEN}. Must be 1, 2, 3, or 4.")
 
 # ----------------------------------------------------------------------
 # 2. CONSTANTS AND DEVICE
@@ -115,8 +129,8 @@ else:
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
-NUM_EPOCHS = 8
-max_dataset_size = 100000
+NUM_EPOCHS = 1
+max_dataset_size = 1000000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -185,7 +199,17 @@ def batch_tokenize(
             return_attention_mask=False
         )
         return {"token_ids": encodings["input_ids"]}
-        
+    
+    elif isinstance(tokenizer, ByteLevelTokenizer):
+        enc = tokenizer(
+            texts,
+            max_length=max_length,
+            padding=True,
+            truncation=True,
+            return_attention_mask=False,
+        )
+        token_ids = enc["input_ids"]
+        return {"token_ids": token_ids}
     else:
         raise TypeError(f"Unsupported tokenizer type: {type(tokenizer)}")
     
@@ -232,6 +256,22 @@ def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) 
 
     proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
     return fertility, proportion_continued_words
+
+def count_chars(sample, key):
+    # Save text
+    text = sample[key]
+    # preprocess text by removing spaces and commas
+    text = text.replace(" ", "").replace(",", "")
+    return len(text)
+
+def count_bytes(sample, key, encoding="utf-8"):
+    """
+    Counts the number of bytes in the given text sample when encoded with the specified encoding.
+    """
+    text = sample[key]
+    text = text.replace(" ", "").replace(",", "")
+    return len(text.encode(encoding))
+
 
 # ----------------------------------------------------------------------
 # 4. RNNLM MODEL DEFINITION (Modified for Flexibility)
@@ -405,11 +445,35 @@ optimizer = torch.optim.Adam(rnn.parameters(), lr=1e-3)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING TRAINING...[/bold green]")
 
+# Pre-calculate total characters in test set for BPC calculation
+total_test_chars = sum(
+    count_chars(sample, key="Text" if DATASET_OPTION == 2 else "text")
+    for sample in dataset["test"]
+)
+total_test_bytes = sum(
+    count_bytes(sample, key="Text" if DATASET_OPTION == 2 else "text")
+    for sample in dataset["test"]
+)
+total_test_bits = total_test_bytes * 8 # assuming 8 bits per byte
+
+# Prepare the full test text for compression baselines
+test_text = "".join(
+    sample["Text" if DATASET_OPTION == 2 else "text"].replace(" ", "").replace(",", "")
+    for sample in dataset["test"]
+)
+test_text_bytes = test_text.encode("utf-8")
+
 start_time = time.time()
+accumulated_testing_duration = 0.0 # to track total testing time
+
+
+train_loss_per_epoch = []
+test_loss_per_epoch = []
 
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
     
+    # Set model to training mode
     rnn.train() 
     total_loss = 0
     total_tokens = 0
@@ -441,20 +505,165 @@ for epoch in range(NUM_EPOCHS):
         optimizer.step()
         
     avg_loss = total_loss / total_tokens
-    rich.print(f"[bold green]Epoch {epoch+1} Complete. Average Training Loss: {avg_loss:.4f}[/bold green]")
+    train_loss_per_epoch.append(avg_loss)
+
+    # TESTING PHASE at the end of each epoch
+    # Do not time testing phase
+    start_testing_time = time.time()
+
+    rnn.eval()
+    total_test_loss = 0
+    total_test_tokens = 0
+    total_entropy_nats = 0.0 
+    with torch.no_grad():
+        for step, token_ids_batch in enumerate(tqdm(
+            torch.utils.data.DataLoader(
+                dataset["test"],
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+            ),
+            desc=f"Testing {epoch+1}"
+        )):
+            
+            token_ids_batch = token_ids_batch.to(DEVICE) 
+
+            # Forward Pass
+            logits = rnn(token_ids_batch)
+            
+            # Prepare Logits and Targets
+            logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+            targets = token_ids_batch[:, 1:].reshape(-1)
+            
+            # --------------------------------------------------------------
+            # 1) NLL (Cross-entropy) 
+            loss = criterion(logits_flat, targets)
+
+            # weight the loss by the number of non-PAD tokens
+            batch_tokens = (targets != PAD_IDX).sum().item()
+            total_test_loss += loss.item() * batch_tokens
+            total_test_tokens += batch_tokens
+            # --------------------------------------------------------------
+            # 2) ENTROPY RATE: H(p(.|context)) in nats
+            #    H(p) = - sum_v p_v log p_v
+            log_probs = torch.log_softmax(logits_flat, dim=-1)        # (N, V)
+            probs = log_probs.exp()                                   # (N, V)
+
+            entropy_per_position = -(probs * log_probs).sum(dim=-1)   # (N,), in nats
+
+            # Only consider non-PAD tokens for entropy calculation
+            non_pad_mask = (targets != PAD_IDX)
+            entropy_valid = entropy_per_position[non_pad_mask]
+
+            total_entropy_nats += entropy_valid.sum().item()
+
+    avg_test_loss = total_test_loss / total_test_tokens
+    test_loss_per_epoch.append(avg_test_loss)
+
+    # BITS PER CHARACTER (BPC) CALCULATION
+    #---------------------------------------
+    total_test_nll_nats = total_test_loss
+    # Convert to bits
+    total_test_nll_bits = total_test_nll_nats / math.log(2.0)
+    # BPC = total bits / nº of characters in test set
+    test_bpc = total_test_nll_bits / total_test_chars
+    #---------------------------------------
+    # BITS PER BYTE (BPB) CALCULATION
+    bpb_model = total_test_nll_bits / total_test_bytes
+    #---------------------------------------
+    # COMPRESSION RATIO ESTIMATION
+    # Assuming 8 bits per byte in original text
+    compression_ratio_model = total_test_nll_bits / total_test_bits
+    #---------------------------------------
+    # NLL per char
+    nll_per_char_nats = total_test_loss / total_test_chars
+    #---------------------------------------
+    # ENTROPY RATE per char
+    entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
+    entropy_rate_bits_per_token = entropy_rate_nats_per_token / math.log(2.0)
+
+    # Convert to "per character" using the total number of characters in the test corpus
+    entropy_rate_bits_per_char = (total_entropy_nats / math.log(2.0)) / total_test_chars
+    #---------------------------------------
+
+    # SUMMARY OF EPOCH
+    rich.print(
+        f"[bold green]Epoch {epoch+1} Complete."
+        # f" Avg Train Loss: {avg_loss:.4f}"
+        # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
+        f" | Avg Test NLL/char: {nll_per_char_nats:.4f} nats/char"
+        f" | Test BPC: {test_bpc:.4f} bits/char"
+        f" | Test BPB: {bpb_model:.4f} bits/byte"
+        f" | Compression Ratio: {compression_ratio_model:.4f}"
+        # f" | Entropy Rate: {entropy_rate_bits_per_token:.4f} bits/token"
+        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char[/bold green]"
+    )
+
+    # CALCULATE TESTING DURATION
+    end_testing_time = time.time()
+    testing_duration = end_testing_time - start_testing_time
+    accumulated_testing_duration += testing_duration
+
 
 end_time = time.time()
-total_time = end_time - start_time
+total_time = end_time - start_time - accumulated_testing_duration # exclude testing time
+
+
+# ------------------------------------------------------------------
+# Compression baselines on TEST corpus
+# ------------------------------------------------------------------
+
+# GZIP
+gzip_compressed = gzip.compress(test_text_bytes)
+gzip_bytes = len(gzip_compressed)
+gzip_bits = gzip_bytes * 8
+gzip_bpb = gzip_bits / total_test_bytes
+gzip_ratio = gzip_bits / total_test_bits  # equivalente: gzip_bytes / total_test_bytes
+
+# BZ2
+bz2_compressed = bz2.compress(test_text_bytes)
+bz2_bytes = len(bz2_compressed)
+bz2_bits = bz2_bytes * 8
+bz2_bpb = bz2_bits / total_test_bytes
+bz2_ratio = bz2_bits / total_test_bits
+
+# LZMA
+lzma_compressed = lzma.compress(test_text_bytes)
+lzma_bytes = len(lzma_compressed)
+lzma_bits = lzma_bytes * 8
+lzma_bpb = lzma_bits / total_test_bytes
+lzma_ratio = lzma_bits / total_test_bits
+
+rich.print("\n[bold cyan]Compression baselines on TEST corpus (preprocessed text):[/bold cyan]")
+rich.print(f"  Raw size: {total_test_bytes} bytes")
+rich.print(f"  GZIP: {gzip_bytes} bytes | {gzip_bpb:.4f} bits/byte | ratio: {gzip_ratio:.4f}")
+rich.print(f"  BZ2 : {bz2_bytes} bytes | {bz2_bpb:.4f} bits/byte | ratio: {bz2_ratio:.4f}")
+rich.print(f"  LZMA: {lzma_bytes} bytes | {lzma_bpb:.4f} bits/byte | ratio: {lzma_ratio:.4f}\n")
 
 
 # ----------------------------------------------------------------------
-# NEW: TRAINING SUMMARY REPORT
+# TRAINING SUMMARY REPORT
 # ----------------------------------------------------------------------
 rich.print("\n" + "="*50)
 rich.print("[bold magenta]TRAINING SUMMARY REPORT (RNN)[/bold magenta]")
 rich.print(f"  Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
 rich.print(f"  Final Avg Training Loss: [yellow]{avg_loss:.4f}[/yellow]")
 rich.print("="*50 + "\n")
+
+# ----------------------------------------------------------------------
+# TRAINING/TESTING ERROR VS EPOCHS PLOTTING
+# ----------------------------------------------------------------------
+
+fig,ax = plt.subplots(figsize=(8,6), dpi=300)
+ax.plot(range(1, NUM_EPOCHS+1), train_loss_per_epoch, marker='.', linestyle='-')
+ax.plot(range(1, NUM_EPOCHS+1), test_loss_per_epoch, marker='.', linestyle='-')
+ax.legend(['Training Loss', 'Testing Loss'], fontsize=10)
+ax.set_xlabel("Epoch", fontsize=12)
+ax.set_ylabel("Average Loss per Token", fontsize=12)
+ax.grid(True)
+plt.show()
+
 
 
 # ----------------------------------------------------------------------
@@ -504,7 +713,7 @@ eval_sentence = "A dog is an amazing animal with a heart of a true lifemate of m
 
 
 # ----------------------------------------------------------------------
-# NEW: NLS AND SUBWORD FERTILITY METRICS
+# NLS AND SUBWORD FERTILITY METRICS
 # ----------------------------------------------------------------------
 rich.print("\n" + "="*50)
 rich.print("[bold blue]STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)[/bold blue]")
@@ -559,7 +768,7 @@ rich.print("="*50 + "\n")
 
 
 # ----------------------------------------------------------------------
-# NEW: MEMORY SIZE BREAKDOWN
+# MEMORY SIZE BREAKDOWN
 # ----------------------------------------------------------------------
 # Get the WTE layer (Embedding layer)
 wte_rnn = rnn.embeddings
