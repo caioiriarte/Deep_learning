@@ -22,7 +22,6 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from torch.utils.data import DataLoader
 import pickle
 import time
-import math
 import gzip
 import bz2
 import lzma
@@ -99,7 +98,7 @@ elif TOKEN == 2:
     tokenizer_name = "bert-base-uncased"
     current_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     current_vocab_size = current_tokenizer.vocab_size
-    current_embed_dim = 300 
+    current_embed_dim = 240 # Matching transformer 
     PAD_IDX = current_tokenizer.pad_token_id or current_tokenizer.unk_token_id
 
 elif TOKEN == 3:
@@ -107,7 +106,7 @@ elif TOKEN == 3:
     tokenizer_name = "gpt2"
     current_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     current_vocab_size = current_tokenizer.vocab_size
-    current_embed_dim = 300 
+    current_embed_dim = 240 # Matching transformer 
     # GPT-2 has no explicit pad token by default; using EOS as a common choice for LMs
     current_tokenizer.pad_token = current_tokenizer.eos_token 
     PAD_IDX = current_tokenizer.pad_token_id
@@ -116,7 +115,7 @@ elif TOKEN == 4:
     rich.print("[bold red]Using TOKENIZER 4: Byte-level encoding[/bold red]")
     current_tokenizer = ByteLevelTokenizer()
     current_vocab_size = current_tokenizer.vocab_size   # 258 by default
-    current_embed_dim = 300
+    current_embed_dim = 240 # Matching transformer
     PAD_IDX = current_tokenizer.pad_token_id
 
 
@@ -130,7 +129,7 @@ else:
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
 NUM_EPOCHS = 1
-max_dataset_size = 1000000
+max_dataset_size = 1000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -279,7 +278,13 @@ def count_bytes(sample, key, encoding="utf-8"):
 
 class RNNLM(torch.nn.Module):
     """A simple implementation of a language model using RNNs."""
-    def __init__(self, vocab_size: int, embed_dim: int, vectors: torch.Tensor = None):
+    def __init__(
+            self, 
+            vocab_size: int, 
+            embed_dim: int, 
+            vectors: torch.Tensor = None,
+            num_parallel_layers: int = 1
+        ):
         super().__init__()
         
         # 1. Embeddings Layer
@@ -292,13 +297,18 @@ class RNNLM(torch.nn.Module):
         else:
             rich.print("[bold cyan]Randomly Initializing Embeddings/Proj (GloVe not used).[/bold cyan]")
 
-        # 2. LSTM Layer 
-        self.rnn = torch.nn.LSTM(
-            input_size=embed_dim,
-            hidden_size=embed_dim,
-            num_layers=1,
-            batch_first=True,
-        )
+        # 2. LSTM Layers in parallel
+        #    All layers share the same input/output dimensionality.
+        self.num_parallel_layers = num_parallel_layers
+        self.rnns = nn.ModuleList([
+            nn.LSTM(
+                input_size=embed_dim,
+                hidden_size=embed_dim,
+                num_layers=1,
+                batch_first=True,
+            )
+            for _ in range(self.num_parallel_layers)
+        ])
 
         # 3. Projection Layer 
         self.proj = nn.Linear(embed_dim, vocab_size, bias=False)
@@ -322,8 +332,17 @@ class RNNLM(torch.nn.Module):
                          device=self.embeddings.weight.device, dtype=self.embeddings.weight.dtype)
         ws_shifted = torch.cat([w0, ws[:, :-1]], dim=1)
 
-        # call the RNN: w_{-1:T-1} -> h{1:T}
-        hidden_states, _ = self.rnn(ws_shifted)
+        # Call the parallel RNNs: w_{-1:T-1} -> h_{1:T}
+        hidden_states_sum = None
+        for rnn in self.rnns:
+            hs, _ = rnn(ws_shifted)
+            if hidden_states_sum is None:
+                hidden_states_sum = hs
+            else:
+                hidden_states_sum = hidden_states_sum + hs
+
+        # Average the outputs of all parallel layers
+        hidden_states = hidden_states_sum / self.num_parallel_layers
 
         # project the hidden state to the vocabulary space
         logits = self.proj(hidden_states)
@@ -422,7 +441,8 @@ checkpoint_file = Path("rrn-lm.ckpt")
 rnn = RNNLM(
     vocab_size=current_vocab_size,
     embed_dim=current_embed_dim,
-    vectors=vectors_for_init
+    vectors=vectors_for_init,
+    num_parallel_layers=65
 )
 
 if checkpoint_file.exists():
@@ -579,6 +599,9 @@ for epoch in range(NUM_EPOCHS):
     # NLL per char
     nll_per_char_nats = total_test_loss / total_test_chars
     #---------------------------------------
+    # PERPLEXITY PER CHARACTER 
+    perplexity_per_char = math.exp(nll_per_char_nats)
+    #---------------------------------------
     # ENTROPY RATE per char
     entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
     entropy_rate_bits_per_token = entropy_rate_nats_per_token / math.log(2.0)
@@ -592,7 +615,7 @@ for epoch in range(NUM_EPOCHS):
         f"[bold green]Epoch {epoch+1} Complete."
         # f" Avg Train Loss: {avg_loss:.4f}"
         # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
-        f" | Avg Test NLL/char: {nll_per_char_nats:.4f} nats/char"
+        f" | Perplexity/char: {perplexity_per_char:.4f}"
         f" | Test BPC: {test_bpc:.4f} bits/char"
         f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
         f" | Test BPB: {bpb_model:.4f} bits/byte"

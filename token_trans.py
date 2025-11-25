@@ -157,7 +157,7 @@ else:
 #   MODEL SETUP (Weights)
 config = AutoConfig.from_pretrained(arch_name) 
 config.vocab_size = current_vocab_size 
-config.hidden_size = 240                    #   Must be multiple of 12 (number of attention heads)
+config.hidden_size = 240                    #   Must be multiple of 12 (number of attention heads) Same as RNN
 config.num_hidden_layers = 6                #   Down from 12 (BERT-base)
 config.intermediate_size = 1024             #   Must be adjusted proportionally
 
@@ -496,6 +496,9 @@ for epoch in range(NUM_EPOCHS):
     #---------------------------------------
     # NLL per char
     nll_per_char_nats = total_test_loss / total_test_chars
+    #---------------------------------------
+    # PERPLEXITY PER CHARACTER
+    perplexity_per_char = math.exp(nll_per_char_nats)
     #---------------------------------------
     # ENTROPY RATE per char
     entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
