@@ -129,7 +129,7 @@ else:
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
 NUM_EPOCHS = 1
-max_dataset_size = 1000
+max_dataset_size = 10#1000000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -367,6 +367,56 @@ class RNNLM(torch.nn.Module):
             token_ids = torch.cat([token_ids, tokens_t], dim=1)
         return token_ids
 
+# Calculate size of the model:
+
+def get_rnn_size_breakdown(rnn: RNNLM) -> Dict[str, int]:
+    """
+    Outputs a breakdown of the RNN model size in terms of number of parameters:
+      - total_params: all parameters
+      - embed_params: embeddings only
+      - head_params: output projection only
+      - core_params: rest (parallel LSTMs)
+    """
+    total_params = sum(p.numel() for p in rnn.parameters())
+    
+    # Embedding (WTE)
+    embed_params = rnn.embeddings.weight.numel()
+    
+    # Output projection (head)
+    head_params = rnn.proj.weight.numel()
+    
+    # Core of the model (independent of vocab_size)
+    core_params = total_params - embed_params - head_params
+    
+    return {
+        "total_params": total_params,
+        "embed_params": embed_params,
+        "head_params": head_params,
+        "core_params": core_params,
+    }
+
+
+def print_rnn_size_breakdown(rnn: RNNLM):
+    breakdown = get_rnn_size_breakdown(rnn)
+    
+    total_bytes = breakdown["total_params"] * 4
+    embed_bytes = breakdown["embed_params"] * 4
+    head_bytes = breakdown["head_params"] * 4
+    core_bytes = breakdown["core_params"] * 4
+    
+    rich.print("\n" + "="*50)
+    rich.print("[bold red]RNN MODEL SIZE BREAKDOWN[/bold red]\n")
+    rich.print(f"  Total params      : [{breakdown['total_params']:,} "
+               f"([bold red]{bytes_to_readable(total_bytes)}[/bold red])")
+    rich.print(f"  Embeddings (WTE)  : {breakdown['embed_params']:,} "
+               f"([bold red]{bytes_to_readable(embed_bytes)}[/bold red])")
+    rich.print(f"  Output head (proj): {breakdown['head_params']:,} "
+               f"([bold red]{bytes_to_readable(head_bytes)}[/bold red])")
+    rich.print(f"  Core (LSTMs only) : {breakdown['core_params']:,} "
+               f"([bold red]{bytes_to_readable(core_bytes)}[/bold red])")
+    rich.print("="*50 + "\n")
+
+
 # ----------------------------------------------------------------------
 # 5. DATASET PREPARATION
 # ----------------------------------------------------------------------
@@ -383,24 +433,29 @@ if DATASET_OPTION == 1:
     rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
     # load AG News, take a subset of `max_dataset_size` rows and tokenize
     dataset = datasets.load_dataset("ag_news")
-    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
 elif DATASET_OPTION == 2:
     rich.print(f"[bold blue]Using Tiny Shakespeare Dataset: {max_dataset_size} samples[/bold blue]")
     dataset = datasets.load_dataset("Trelis/tiny-shakespeare")
-    dataset = datasets.DatasetDict({split: dset.select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
 elif DATASET_OPTION == 3:
     rich.print(f"[bold blue]Using FineWeb2 Dataset: {max_dataset_size} samples[/bold blue]")
     splits = ["train", "test"]
     filtered_dict = {}
     for split in splits:
         # Load FineWeb2 as IterableDataset for each split
-        fineweb_list = list(islice(datasets.load_dataset(
+        streaming_ds = datasets.load_dataset(
             "HuggingFaceFW/fineweb-2",
             name="spa_Latn",
             split=split,
-            streaming=True
-        ), max_dataset_size))
-        
+            streaming=True,
+        )
+
+        # Shuffle the stream (approximate shuffle using a buffer)
+        streaming_ds = streaming_ds.shuffle(seed=42, buffer_size=10_000)
+
+        # Now take max_dataset_size examples from the shuffled stream
+        fineweb_list = list(islice(streaming_ds, max_dataset_size))
         # Filter only the 'text' field
         filtered = [{"text": row["text"]} for row in fineweb_list]
         
@@ -442,7 +497,7 @@ rnn = RNNLM(
     vocab_size=current_vocab_size,
     embed_dim=current_embed_dim,
     vectors=vectors_for_init,
-    num_parallel_layers=65
+    num_parallel_layers=17
 )
 
 if checkpoint_file.exists():
@@ -616,8 +671,8 @@ for epoch in range(NUM_EPOCHS):
         # f" Avg Train Loss: {avg_loss:.4f}"
         # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
         f" | Perplexity/char: {perplexity_per_char:.4f}"
-        f" | Test BPC: {test_bpc:.4f} bits/char"
-        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
+        # f" | Test BPC: {test_bpc:.4f} bits/char"
+        # f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
         f" | Test BPB: {bpb_model:.4f} bits/byte"
         f" | Compression Ratio: {compression_ratio_model:.4f}[/bold green]"
         # f" | Entropy Rate: {entropy_rate_bits_per_token:.4f} bits/token"
@@ -685,7 +740,7 @@ ax.legend(['Training Loss', 'Testing Loss'], fontsize=10)
 ax.set_xlabel("Epoch", fontsize=12)
 ax.set_ylabel("Average Loss per Token", fontsize=12)
 ax.grid(True)
-plt.show()
+# plt.show()
 
 
 
@@ -793,186 +848,167 @@ rich.print("="*50 + "\n")
 # ----------------------------------------------------------------------
 # MEMORY SIZE BREAKDOWN
 # ----------------------------------------------------------------------
-# Get the WTE layer (Embedding layer)
-wte_rnn = rnn.embeddings
+print_rnn_size_breakdown(rnn)
 
-# Size of the WTE (Embedding) layer
-wte_params = wte_rnn.weight.numel() 
-total_wte = wte_params * 4        # Bytes/parameter (float32)
+# # ----------------------------------------------------------------------
+# # BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
+# # ----------------------------------------------------------------------
+# rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
-# Total Model Size (WTE + RNN + Proj)
-total_params = sum(p.numel() for p in rnn.parameters())
-total_bytes = total_params * 4
+# # Reset gradients 
+# rnn.zero_grad()
+# rnn.train()
 
-# RNN/Projection Layers Size (excluding WTE)
-total_model_layers = total_bytes - total_wte
+# # 1. Get DUMMY token ids for the specific visualization size (10x10)
+# T_SIZE = 10
+# # Ensure token IDs are within the current vocabulary range
+# token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
+# token_ids_test = token_ids_test.to(DEVICE)
 
-rich.print("\n" + "="*50)
-rich.print("[bold red]MODEL MEMORY SIZE BREAKDOWN[/bold red]\n")
-rich.print(f"  Total Model Size: [red]{bytes_to_readable(total_bytes)}[/red]")
-rich.print(f"  Total WTE Size: [red]{bytes_to_readable(total_wte)}[/red]")
-rich.print(f"  RNN/Projection Layers Size: [red]{bytes_to_readable(total_model_layers)}[/red]")
-rich.print("="*50 + "\n")
+# # 2. Run forward pass with retain_ws=True to save embeddings for gradient extraction
+# logits = rnn(token_ids_test, retain_ws=True)
 
-# ----------------------------------------------------------------------
-# BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
-# ----------------------------------------------------------------------
-rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
+# # 3. Compute the specific loss for the visualization test:
+# loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
+# loss_locations = loss_locations.to(DEVICE)
+# loss_test = logits.gather(index=loss_locations, dim=1).mean()
 
-# Reset gradients 
-rnn.zero_grad()
-rnn.train()
+# # 4. Backward pass to retrieve the gradients
+# loss_test.backward()
+# grad_magnitude = rnn.ws.grad.norm(dim=2)
+# rnn.ws = None # Clean up
 
-# 1. Get DUMMY token ids for the specific visualization size (10x10)
-T_SIZE = 10
-# Ensure token IDs are within the current vocabulary range
-token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
-token_ids_test = token_ids_test.to(DEVICE)
+# # 5. Visualize the gradient
+# grad_magnitude[grad_magnitude==0] = -math.inf 
+# grad_magnitude = grad_magnitude.detach().cpu().numpy()
+# plt.figure(figsize=(8, 6))
+# plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+# plt.colorbar()
+# plt.grid(False)
+# plt.xlabel("$t$ (input)")
+# plt.ylabel("$t'$ (loss)")
+# plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
+# plt.show()
 
-# 2. Run forward pass with retain_ws=True to save embeddings for gradient extraction
-logits = rnn(token_ids_test, retain_ws=True)
+# # ----------------------------------------------------------------------
+# # BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
+# # ----------------------------------------------------------------------
+# # Since the `RNNLM` does not use attention, this section is for conceptual comparison.
 
-# 3. Compute the specific loss for the visualization test:
-loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
-loss_locations = loss_locations.to(DEVICE)
-loss_test = logits.gather(index=loss_locations, dim=1).mean()
+# # Helper function to convert IDs back to tokens (handles all tokenizers)
+# def get_tokens_from_ids(token_ids, tokenizer):
+#     if isinstance(tokenizer, tokenizers.Tokenizer):
+#         # Assuming original tokenizers lib object has a proper vocabulary object
+#         if hasattr(tokenizer, 'get_vocabulary'):
+#             vocab = tokenizer.get_vocabulary()
+#             return [vocab[i] for i in token_ids]
+#         else:
+#             return [str(i) for i in token_ids] # Fallback
+#     elif isinstance(tokenizer, PreTrainedTokenizer):
+#         # Use transformers decoder
+#         return tokenizer.convert_ids_to_tokens(token_ids.tolist())
+#     return [str(i) for i in token_ids]
 
-# 4. Backward pass to retrieve the gradients
-loss_test.backward()
-grad_magnitude = rnn.ws.grad.norm(dim=2)
-rnn.ws = None # Clean up
+# # Instantiate new embeddings for visualization (not part of the model)
+# embeddings = torch.nn.Embedding(current_vocab_size, current_embed_dim)
+# if TOKEN == 1:
+#     embeddings.weight.data = glove_vectors
+# embeddings.weight.requires_grad = False
 
-# 5. Visualize the gradient
-grad_magnitude[grad_magnitude==0] = -math.inf 
-grad_magnitude = grad_magnitude.detach().cpu().numpy()
-plt.figure(figsize=(8, 6))
-plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-plt.colorbar()
-plt.grid(False)
-plt.xlabel("$t$ (input)")
-plt.ylabel("$t'$ (loss)")
-plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
-plt.show()
+# # get a more natural sentence
+# sentence = "Masked attention allows implementing dependency constrains between inputs and outputs"
+# # Tokenize the sentence using the current tokenizer
+# # Use the batch_tokenize logic for consistency and get the first result
+# token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=15, tokenizer=current_tokenizer)['token_ids'][0])
 
-# ----------------------------------------------------------------------
-# BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
-# ----------------------------------------------------------------------
-# Since the `RNNLM` does not use attention, this section is for conceptual comparison.
-
-# Helper function to convert IDs back to tokens (handles all tokenizers)
-def get_tokens_from_ids(token_ids, tokenizer):
-    if isinstance(tokenizer, tokenizers.Tokenizer):
-        # Assuming original tokenizers lib object has a proper vocabulary object
-        if hasattr(tokenizer, 'get_vocabulary'):
-            vocab = tokenizer.get_vocabulary()
-            return [vocab[i] for i in token_ids]
-        else:
-            return [str(i) for i in token_ids] # Fallback
-    elif isinstance(tokenizer, PreTrainedTokenizer):
-        # Use transformers decoder
-        return tokenizer.convert_ids_to_tokens(token_ids.tolist())
-    return [str(i) for i in token_ids]
-
-# Instantiate new embeddings for visualization (not part of the model)
-embeddings = torch.nn.Embedding(current_vocab_size, current_embed_dim)
-if TOKEN == 1:
-    embeddings.weight.data = glove_vectors
-embeddings.weight.requires_grad = False
-
-# get a more natural sentence
-sentence = "Masked attention allows implementing dependency constrains between inputs and outputs"
-# Tokenize the sentence using the current tokenizer
-# Use the batch_tokenize logic for consistency and get the first result
-token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=15, tokenizer=current_tokenizer)['token_ids'][0])
-
-tokens = get_tokens_from_ids(token_ids, current_tokenizer)
-vectors = embeddings(token_ids)
+# tokens = get_tokens_from_ids(token_ids, current_tokenizer)
+# vectors = embeddings(token_ids)
 
 
-"""
-    The plot_attention_map function is purely a visualization utility used to create and format a heatmap
-    that represents attention weights. It takes the numerical attention scores and transforms them into
-    an interpretable diagram.
-"""
-def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:bool=False, ax=None, color_bar:bool=True):
-    if ax is None:
-        fig, ax = plt.subplots(figsize = (4,2), dpi=300) 
-    else:
-        fig = plt.gcf()
-    im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
-    ax.grid(False)
+# """
+#     The plot_attention_map function is purely a visualization utility used to create and format a heatmap
+#     that represents attention weights. It takes the numerical attention scores and transforms them into
+#     an interpretable diagram.
+# """
+# def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:bool=False, ax=None, color_bar:bool=True):
+#     if ax is None:
+#         fig, ax = plt.subplots(figsize = (4,2), dpi=300) 
+#     else:
+#         fig = plt.gcf()
+#     im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
+#     ax.grid(False)
     
-    # Set font size for the Y-axis labels
-    ax.set_yticks(np.arange(len(queries_labels)))
-    ax.set_yticklabels(queries_labels, fontsize=4) 
+#     # Set font size for the Y-axis labels
+#     ax.set_yticks(np.arange(len(queries_labels)))
+#     ax.set_yticklabels(queries_labels, fontsize=4) 
     
-    # Set font size for the X-axis labels
-    ax.set_xticks(np.arange(len(keys_labels)))
-    ax.set_xticklabels(keys_labels, fontsize=4) 
+#     # Set font size for the X-axis labels
+#     ax.set_xticks(np.arange(len(keys_labels)))
+#     ax.set_xticklabels(keys_labels, fontsize=4) 
     
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+#     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-    if print_values:
-        for i in range(len(queries_labels)):
-            for j in range(len(keys_labels)):
-                text = ax.text(j, i, f"{attention_map[i, j]:.2f}",
-                            ha="center", va="center", color="w", fontsize=4)
+#     if print_values:
+#         for i in range(len(queries_labels)):
+#             for j in range(len(keys_labels)):
+#                 text = ax.text(j, i, f"{attention_map[i, j]:.2f}",
+#                             ha="center", va="center", color="w", fontsize=4)
 
-    if color_bar:
-      cbar = fig.colorbar(im, fraction=0.02, pad=0.04, shrink=0.7)
-      cbar.ax.tick_params(labelsize=4)
+#     if color_bar:
+#       cbar = fig.colorbar(im, fraction=0.02, pad=0.04, shrink=0.7)
+#       cbar.ax.tick_params(labelsize=4)
       
-    fig.tight_layout()
+#     fig.tight_layout()
 
 
-"""
-    The masked_attention function implements a simplified version of the scaled dot-product attention mechanism
-    used in Transformers, with the crucial addition of an optional masking operation
-"""
-def masked_attention(Q, K, V, tau=None, mask=None):
-    """A simple masked attention layer"""
-    if tau is None:
-        tau = math.sqrt(float(Q.shape[-1]))
-    assert Q.shape[-1] == K.shape[-1]
-    assert K.shape[0] == V.shape[0]
-    attention_map = Q @ K.T / tau
-    if mask is not None:
-        attention_map = mask + attention_map
-    attention_weights = attention_map.softmax(dim=1)
-    return torch.einsum("qk, kh -> qh", attention_weights, V), attention_weights
+# """
+#     The masked_attention function implements a simplified version of the scaled dot-product attention mechanism
+#     used in Transformers, with the crucial addition of an optional masking operation
+# """
+# def masked_attention(Q, K, V, tau=None, mask=None):
+#     """A simple masked attention layer"""
+#     if tau is None:
+#         tau = math.sqrt(float(Q.shape[-1]))
+#     assert Q.shape[-1] == K.shape[-1]
+#     assert K.shape[0] == V.shape[0]
+#     attention_map = Q @ K.T / tau
+#     if mask is not None:
+#         attention_map = mask + attention_map
+#     attention_weights = attention_map.softmax(dim=1)
+#     return torch.einsum("qk, kh -> qh", attention_weights, V), attention_weights
 
 
-# EXERCISE: Implement the masks corresponding to each factorization
-T = len(token_ids)
-masks = {
-    "left-to-right": torch.triu(torch.ones(T, T), diagonal=0),
-    "bidirectional": torch.zeros(T, T),
-    "right-to-left": torch.tril(torch.ones(T, T), diagonal=0)
-}
-for key in masks.keys():
-    if masks[key] is not None:
-        # Convert 1s to -inf and 0s to 0 to mask logits before softmax
-        masks[key] = torch.where(masks[key] == 0, 0.0, -math.inf)
+# # EXERCISE: Implement the masks corresponding to each factorization
+# T = len(token_ids)
+# masks = {
+#     "left-to-right": torch.triu(torch.ones(T, T), diagonal=0),
+#     "bidirectional": torch.zeros(T, T),
+#     "right-to-left": torch.tril(torch.ones(T, T), diagonal=0)
+# }
+# for key in masks.keys():
+#     if masks[key] is not None:
+#         # Convert 1s to -inf and 0s to 0 to mask logits before softmax
+#         masks[key] = torch.where(masks[key] == 0, 0.0, -math.inf)
 
-# visualized the log of the masked attention map
-fig, axes = plt.subplots(ncols=1+len(masks), figsize = (8,6), sharex=False, sharey=False, dpi=300)
+# # visualized the log of the masked attention map
+# fig, axes = plt.subplots(ncols=1+len(masks), figsize = (8,6), sharex=False, sharey=False, dpi=300)
 
-# plot the gradient map from the RNN LM
-axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-axes.flat[0].set_xlabel("$t$ (input)",fontsize=4)
-axes.flat[0].set_ylabel("$t'$ (output)",fontsize=4)
-axes.flat[0].grid(False)
-axes.flat[0].set_title("Gradient map (RNN LM)",fontsize=6)
-axes.flat[0].tick_params(axis='both', which='major', labelsize=4)
+# # plot the gradient map from the RNN LM
+# axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+# axes.flat[0].set_xlabel("$t$ (input)",fontsize=4)
+# axes.flat[0].set_ylabel("$t'$ (output)",fontsize=4)
+# axes.flat[0].grid(False)
+# axes.flat[0].set_title("Gradient map (RNN LM)",fontsize=6)
+# axes.flat[0].tick_params(axis='both', which='major', labelsize=4)
 
-# plot the attention map
-for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
-    if mask is not None:
-        # Use zero matrix for Q, K, V as we only care about the mask effect on attention map
-        H, attention_map_masked = masked_attention(vectors, vectors, vectors, mask=mask)
+# # plot the attention map
+# for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
+#     if mask is not None:
+#         # Use zero matrix for Q, K, V as we only care about the mask effect on attention map
+#         H, attention_map_masked = masked_attention(vectors, vectors, vectors, mask=mask)
 
-        # Use log() to better visualize the zero/masked areas
-        plot_attention_map(attention_map_masked.log(), tokens, tokens, ax=ax, color_bar=False)
-    ax.set_title(f"Attention map {mask_name}",fontsize=6)
-plt.tight_layout()
-plt.show()
+#         # Use log() to better visualize the zero/masked areas
+#         plot_attention_map(attention_map_masked.log(), tokens, tokens, ax=ax, color_bar=False)
+#     ax.set_title(f"Attention map {mask_name}",fontsize=6)
+# plt.tight_layout()
+# plt.show()

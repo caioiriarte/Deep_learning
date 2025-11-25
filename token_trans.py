@@ -82,7 +82,7 @@ ARCHITECTURE = 3
 # TOKENIZER = 2: BERT WordPiece Tokenizer
 # TOKENIZER = 3: GPT-2 BPE Tokenizer
 # TOKEN = 4: Byte-level encoding
-TOKENIZER = 3
+TOKENIZER = 4
 
 # Configuration mapping for architectures
 ARCH_CONFIGS = {
@@ -158,7 +158,7 @@ else:
 config = AutoConfig.from_pretrained(arch_name) 
 config.vocab_size = current_vocab_size 
 config.hidden_size = 240                    #   Must be multiple of 12 (number of attention heads) Same as RNN
-config.num_hidden_layers = 6                #   Down from 12 (BERT-base)
+config.num_hidden_layers = 11                #   Down from 12 (BERT-base)
 config.intermediate_size = 1024             #   Must be adjusted proportionally
 
 config.output_hidden_states = True
@@ -177,7 +177,7 @@ current_embed_dim = current_model.config.hidden_size
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
 NUM_EPOCHS = 1
-max_dataset_size = 100000
+max_dataset_size = 10#1000000
 max_seq_size = 10 
 rich.print(f"Device: [red]{DEVICE}[/red] | Model Class: [red]{current_model.__class__.__name__}[/red] \
 Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
@@ -273,6 +273,112 @@ def count_bytes(sample, key, encoding="utf-8"):
     return len(text.encode(encoding))
 
 # ----------------------------------------------------------------------
+#  SIZE BREAKDOWN HELPERS 
+# ----------------------------------------------------------------------
+
+def bytes_to_readable(total_bytes: int) -> str:
+    """Convert a number of bytes into a human-readable string."""
+    if total_bytes >= 1024**3:   # Gigabytes
+        return f"{total_bytes / 1024**3:.2f} GB"
+    elif total_bytes >= 1024**2: # Megabytes
+        return f"{total_bytes / 1024**2:.2f} MB"
+    else:                        # Kilobytes
+        return f"{total_bytes / 1024:.2f} KB"
+
+
+def get_transformer_head_module(model: PreTrainedModel):
+    """
+    Try to locate the output head (LM head / decoder) of a transformers model.
+    Returns the module or None if it cannot be found.
+    """
+    # 1) Official API: get_output_embeddings
+    if hasattr(model, "get_output_embeddings"):
+        head = model.get_output_embeddings()
+        if head is not None:
+            return head
+    
+    # 2) GPT-like causal LMs usually expose `lm_head`
+    if hasattr(model, "lm_head"):
+        return model.lm_head
+    
+    # 3) BERT-style MaskedLM often uses `cls.predictions.decoder`
+    if hasattr(model, "cls") and hasattr(model.cls, "predictions"):
+        preds = model.cls.predictions
+        if hasattr(preds, "decoder"):
+            return preds.decoder
+    
+    return None
+
+
+def get_transformer_size_breakdown(model: PreTrainedModel) -> Dict[str, int]:
+    """
+    Return a dictionary with the parameter breakdown of a transformers model:
+      - total_params : all parameters
+      - embed_params : input embedding table
+      - head_params  : output head / decoder (if not tied)
+      - core_params  : the rest (encoder/decoder blocks only)
+    Correctly handles the case where input embeddings and output head share weights.
+    """
+    # Total number of parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    # Input embeddings
+    embed_params = 0
+    embed_weight = None
+    if hasattr(model, "get_input_embeddings"):
+        emb = model.get_input_embeddings()
+        if emb is not None and hasattr(emb, "weight"):
+            embed_weight = emb.weight
+            embed_params = emb.weight.numel()
+    
+    # Output head
+    head_params = 0
+    head_weight = None
+    head_module = get_transformer_head_module(model)
+    if head_module is not None and hasattr(head_module, "weight"):
+        head_weight = head_module.weight
+        
+        # If head and embeddings share the same underlying storage, do not double-count
+        if embed_weight is not None and head_weight.data_ptr() == embed_weight.data_ptr():
+            head_params = 0
+        else:
+            head_params = head_weight.numel()
+    
+    core_params = total_params - embed_params - head_params
+    
+    return {
+        "total_params": total_params,
+        "embed_params": embed_params,
+        "head_params": head_params,
+        "core_params": core_params,
+    }
+
+
+def print_transformer_size_breakdown(model: PreTrainedModel):
+    """
+    Pretty-print the size breakdown (in parameters and bytes) for a transformers model.
+    """
+    breakdown = get_transformer_size_breakdown(model)
+    
+    total_bytes = breakdown["total_params"] * 4
+    embed_bytes = breakdown["embed_params"] * 4
+    head_bytes = breakdown["head_params"] * 4
+    core_bytes = breakdown["core_params"] * 4
+    
+    rich.print("\n" + "="*50)
+    rich.print(f"[bold red]TRANSFORMER MODEL SIZE BREAKDOWN[/bold red]\n")
+    rich.print(f"  Total params      : {breakdown['total_params']:,} "
+               f"([bold red]{bytes_to_readable(total_bytes)}[/bold red])")
+    rich.print(f"  Embeddings (WTE)  : {breakdown['embed_params']:,} "
+               f"([bold red]{bytes_to_readable(embed_bytes)}[/bold red])")
+    rich.print(f"  Output head       : {breakdown['head_params']:,} "
+               f"([bold red]{bytes_to_readable(head_bytes)}[/bold red])")
+    rich.print(f"  Core (blocks only): {breakdown['core_params']:,} "
+               f"([bold red]{bytes_to_readable(core_bytes)}[/bold red])")
+    rich.print("="*50 + "\n")
+
+
+# ----------------------------------------------------------------------
 #   DATASET PREPARATION
 # ----------------------------------------------------------------------
 
@@ -281,7 +387,7 @@ def count_bytes(sample, key, encoding="utf-8"):
 # 1: AG News dataset
 # 2: Tiny Shakespeare dataset
 # 3: FineWeb2 dataset
-DATASET_OPTION = 3
+DATASET_OPTION = 1
 
 if DATASET_OPTION == 1:
     rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
@@ -513,9 +619,9 @@ for epoch in range(NUM_EPOCHS):
         f"[bold green]Epoch {epoch+1} Complete."
         # f" Avg Train Loss: {avg_loss:.4f}"
         # f" | Avg Test Loss (per token): {avg_test_loss:.4f}"
-        f" | Avg Test NLL/char: {nll_per_char_nats:.4f} nats/char"
-        f" | Test BPC: {test_bpc:.4f} bits/char"
-        f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
+        f" | Perplexity/char: {perplexity_per_char:.4f}"
+        # f" | Test BPC: {test_bpc:.4f} bits/char"
+        # f" | Entropy Rate: {entropy_rate_bits_per_char:.4f} bits/char"
         f" | Test BPB: {bpb_model:.4f} bits/byte"
         f" | Compression Ratio: {compression_ratio_model:.4f}[/bold green]"
         # f" | Entropy Rate: {entropy_rate_bits_per_token:.4f} bits/token"
@@ -535,279 +641,261 @@ rich.print(f"Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
 eval_sentence = "A dog is an amazing animal with a heart of a true lifemate of men, and with many other qualities"
 rich.print(f"\nTokenizer evaluation on '{eval_sentence}'")
 
-# ----------------------------------------------------------------------
-#   NORMALIZED LENGTH SCORE (NLS) EVALUATION
-# ----------------------------------------------------------------------
+# # ----------------------------------------------------------------------
+# #   NORMALIZED LENGTH SCORE (NLS) EVALUATION
+# # ----------------------------------------------------------------------
 
-rich.print("\n[bold blue]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold blue]\n")
-""" The higher the NLS value, the worse the option is, in principle. """
+# rich.print("\n[bold blue]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold blue]\n")
+# """ The higher the NLS value, the worse the option is, in principle. """
 
-# Count words (W) and characters (C)
-nls_word_count = len(eval_sentence.split())
-nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
+# # Count words (W) and characters (C)
+# nls_word_count = len(eval_sentence.split())
+# nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
 
-# We use a known efficient tokenizer like Llama for the NLS (Reference) metric
-t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
+# # We use a known efficient tokenizer like Llama for the NLS (Reference) metric
+# t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
 
-# A. Tokenize with the CURRENT Tokenizer
-current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
-non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
-actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
+# # A. Tokenize with the CURRENT Tokenizer
+# current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
+# non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
+# actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
 
-# B. Calculate NLS_W (Word-Normalized Length)
-token_count = len(actual_tokens)
-nls_w = token_count / nls_word_count
-rich.print(f"NLS_w: [green]{nls_w:.4f}[/green] (Tokens per Word)")
+# # B. Calculate NLS_W (Word-Normalized Length)
+# token_count = len(actual_tokens)
+# nls_w = token_count / nls_word_count
+# rich.print(f"NLS_w: [green]{nls_w:.4f}[/green] (Tokens per Word)")
 
-# C. Calculate NLS_C (Character-Normalized Length)
-nls_c = token_count / nls_char_count
-rich.print(f"NLS_c: [green]{nls_c:.4f}[/green] (Tokens per Character)")
+# # C. Calculate NLS_C (Character-Normalized Length)
+# nls_c = token_count / nls_char_count
+# rich.print(f"NLS_c: [green]{nls_c:.4f}[/green] (Tokens per Character)")
 
-# D. Calculate NLS (Reference)
-if t5_tokenizer is not None:
-    # Tokenize with the REFERENCE Tokenizer
-    t5_tokenization = t5_tokenizer(
-        eval_sentence,
-        max_length=100,
-        padding=False,
-        truncation=True,
-        return_attention_mask=False
-    )
-    # Exclude special tokens like BOS/EOS/Pad if they were included
-    t5_token_ids = t5_tokenization["input_ids"]
-    t5_token_count = len(t5_token_ids)
+# # D. Calculate NLS (Reference)
+# if t5_tokenizer is not None:
+#     # Tokenize with the REFERENCE Tokenizer
+#     t5_tokenization = t5_tokenizer(
+#         eval_sentence,
+#         max_length=100,
+#         padding=False,
+#         truncation=True,
+#         return_attention_mask=False
+#     )
+#     # Exclude special tokens like BOS/EOS/Pad if they were included
+#     t5_token_ids = t5_tokenization["input_ids"]
+#     t5_token_count = len(t5_token_ids)
     
-    # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
-    nls_ref = token_count / t5_token_count
+#     # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
+#     nls_ref = token_count / t5_token_count
 
-    rich.print(f"NLS (Reference: T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
+#     rich.print(f"NLS (Reference: T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
 
 
-rich.print("\n[bold blue]NLS Evaluation Complete.[/bold blue]")
+# rich.print("\n[bold blue]NLS Evaluation Complete.[/bold blue]")
 
-# ----------------------------------------------------------------------
-#   SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION
-# ----------------------------------------------------------------------
+# # ----------------------------------------------------------------------
+# #   SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION
+# # ----------------------------------------------------------------------
 
-rich.print("\n[bold blue]STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...[/bold blue]\n")
+# rich.print("\n[bold blue]STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...[/bold blue]\n")
 
-"""
-    The subword fertility evaluates the amount of tokens generated per word. A fertility of 1.0 is
-    ideal. Normally, the SF value is >= 1.0
+# """
+#     The subword fertility evaluates the amount of tokens generated per word. A fertility of 1.0 is
+#     ideal. Normally, the SF value is >= 1.0
 
-    Another metric that is employed is the proportion of continued words which indicates the percentage
-    of words that are split into multiple tokens. 0 is an ideal value for the CW proportion.
-"""
+#     Another metric that is employed is the proportion of continued words which indicates the percentage
+#     of words that are split into multiple tokens. 0 is an ideal value for the CW proportion.
+# """
 
-def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
-    # Count words using simple space splitting (as per standard practice for these metrics)
-    total_words = len(sentence.split())
-    total_tokens = len(tokens)
+# def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
+#     # Count words using simple space splitting (as per standard practice for these metrics)
+#     total_words = len(sentence.split())
+#     total_tokens = len(tokens)
     
-    if total_words == 0:
-        return 0.0, 0.0
+#     if total_words == 0:
+#         return 0.0, 0.0
         
-    fertility = total_tokens / total_words
+#     fertility = total_tokens / total_words
     
-    #   Calculate Proportion of Continued Words (PCW)
-    split_words_count = 0
-    in_split_word = False
+#     #   Calculate Proportion of Continued Words (PCW)
+#     split_words_count = 0
+#     in_split_word = False
     
-    # Check for GloVe/Word-based tokenizer
-    if token_settings['name'] == 'GloVe':
-        # GloVe is strictly word-based, so no words are split (Fertility = 1.0, PCW = 0.0)
-        return 1.0, 0.0
+#     # Check for GloVe/Word-based tokenizer
+#     if token_settings['name'] == 'GloVe':
+#         # GloVe is strictly word-based, so no words are split (Fertility = 1.0, PCW = 0.0)
+#         return 1.0, 0.0
     
-    for i, token in enumerate(tokens):
-        if token_settings['name'] == 'BERT_WP':
-            if token.startswith('##'):
-                # Token is a continuation of a previous word
-                if not in_split_word:
-                    # Found the first continuation token for a split word
-                    split_words_count += 1
-                    in_split_word = True
-            else:
-                # Token is a new word (or the start of a split word)
-                in_split_word = False
+#     for i, token in enumerate(tokens):
+#         if token_settings['name'] == 'BERT_WP':
+#             if token.startswith('##'):
+#                 # Token is a continuation of a previous word
+#                 if not in_split_word:
+#                     # Found the first continuation token for a split word
+#                     split_words_count += 1
+#                     in_split_word = True
+#             else:
+#                 # Token is a new word (or the start of a split word)
+#                 in_split_word = False
                 
-        elif token_settings['name'] == 'GPT2_BPE':
-            # Check for the space marker 'Ġ' (which signifies the start of a new word)
-            if i > 0 and not token.startswith('Ġ'):
-                # Token is a continuation of the previous word
-                if not in_split_word:
-                    # Found the first continuation token for a split word
-                    split_words_count += 1
-                    in_split_word = True
-            else:
-                # Token is a new word (or the first token of the sequence)
-                in_split_word = False
+#         elif token_settings['name'] == 'GPT2_BPE':
+#             # Check for the space marker 'Ġ' (which signifies the start of a new word)
+#             if i > 0 and not token.startswith('Ġ'):
+#                 # Token is a continuation of the previous word
+#                 if not in_split_word:
+#                     # Found the first continuation token for a split word
+#                     split_words_count += 1
+#                     in_split_word = True
+#             else:
+#                 # Token is a new word (or the first token of the sequence)
+#                 in_split_word = False
 
-    #   PCW = (Number of split words) / (Total number of words)
-    proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
+#     #   PCW = (Number of split words) / (Total number of words)
+#     proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
     
-    # Note: Split words count in this methodology starts counting *after* the initial word part
-    # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
+#     # Note: Split words count in this methodology starts counting *after* the initial word part
+#     # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
     
-    return fertility, proportion_continued_words
+#     return fertility, proportion_continued_words
 
 
-fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
+# fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
 
-rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
-rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
+# rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
+# rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
 
-rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
+# rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
 
 
-# ----------------------------------------------------------------------
-#   GRADIENT VISUALIZATION TEST
-# ----------------------------------------------------------------------
+# # ----------------------------------------------------------------------
+# #   GRADIENT VISUALIZATION TEST
+# # ----------------------------------------------------------------------
 
-rich.print("\n[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
+# rich.print("\n[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
-#   Reset gradients 
-current_model.zero_grad()
+# #   Reset gradients 
+# current_model.zero_grad()
 
-T_SIZE = 10
-token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
-token_ids_test = token_ids_test.to(DEVICE)
+# T_SIZE = 10
+# token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
+# token_ids_test = token_ids_test.to(DEVICE)
 
-#   Get the internal Embedding layer (Model-specific access)
-wte = None
-if hasattr(current_model, 'transformer') and hasattr(current_model.transformer, 'wte'):
-    wte = current_model.transformer.wte                     #   GPT2 access
-elif hasattr(current_model, 'bert') and hasattr(current_model.bert.embeddings, 'word_embeddings'):
-    wte = current_model.bert.embeddings.word_embeddings     #   BERT access
+# #   Get the internal Embedding layer (Model-specific access)
+# wte = None
+# if hasattr(current_model, 'transformer') and hasattr(current_model.transformer, 'wte'):
+#     wte = current_model.transformer.wte                     #   GPT2 access
+# elif hasattr(current_model, 'bert') and hasattr(current_model.bert.embeddings, 'word_embeddings'):
+#     wte = current_model.bert.embeddings.word_embeddings     #   BERT access
     
-if wte is not None:
-    #   The `wte` layer converts the long tensor (IDs) to a float tensor (Embeddings)
-    input_embeddings = wte(token_ids_test)
+# if wte is not None:
+#     #   The `wte` layer converts the long tensor (IDs) to a float tensor (Embeddings)
+#     input_embeddings = wte(token_ids_test)
     
-    #   Now, set requires_grad and retain_grad on the continuous embedding tensor
-    input_embeddings.requires_grad_(True) 
-    input_embeddings.retain_grad()
+#     #   Now, set requires_grad and retain_grad on the continuous embedding tensor
+#     input_embeddings.requires_grad_(True) 
+#     input_embeddings.retain_grad()
     
-    #   Run the rest of the model from the embeddings
-    outputs = current_model(inputs_embeds=input_embeddings)
-    logits = outputs.logits
+#     #   Run the rest of the model from the embeddings
+#     outputs = current_model(inputs_embeds=input_embeddings)
+#     logits = outputs.logits
     
-    #   Compute the specific loss for the visualization test
-    loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
-    loss_locations = loss_locations.to(DEVICE)
-    loss_test = logits.gather(index=loss_locations, dim=1).mean()
+#     #   Compute the specific loss for the visualization test
+#     loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
+#     loss_locations = loss_locations.to(DEVICE)
+#     loss_test = logits.gather(index=loss_locations, dim=1).mean()
     
-    #   Backward pass to retrieve the gradients
-    loss_test.backward()
+#     #   Backward pass to retrieve the gradients
+#     loss_test.backward()
     
-    #   The magnitude is the L2 norm of the gradient w.r.t. the input embeddings
-    grad_magnitude = input_embeddings.grad.norm(dim=2)
+#     #   The magnitude is the L2 norm of the gradient w.r.t. the input embeddings
+#     grad_magnitude = input_embeddings.grad.norm(dim=2)
     
-    #   Visualize the gradient
-    grad_magnitude[grad_magnitude==0] = -math.inf 
-    grad_magnitude = grad_magnitude.detach().cpu().numpy()
-    plt.figure(figsize=(8, 6))
-    plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-    cbar = plt.colorbar() 
-    cbar.ax.tick_params(labelsize=10)
-    plt.grid(False)
-    plt.xlabel("$t$ (input)",fontsize=10)
-    plt.ylabel("$t'$ (loss)",fontsize=10)
-    plt.title(f"Gradient Magnitude (Arch: {arch_settings['name']}, Token: {token_settings['name']})",fontsize=16)
-    plt.show()
+#     #   Visualize the gradient
+#     grad_magnitude[grad_magnitude==0] = -math.inf 
+#     grad_magnitude = grad_magnitude.detach().cpu().numpy()
+#     plt.figure(figsize=(8, 6))
+#     plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+#     cbar = plt.colorbar() 
+#     cbar.ax.tick_params(labelsize=10)
+#     plt.grid(False)
+#     plt.xlabel("$t$ (input)",fontsize=10)
+#     plt.ylabel("$t'$ (loss)",fontsize=10)
+#     plt.title(f"Gradient Magnitude (Arch: {arch_settings['name']}, Token: {token_settings['name']})",fontsize=16)
+#     plt.show()
 
-    #   -----------------------------------------------------------------------------
+#     #   -----------------------------------------------------------------------------
 
-    #   Get the size of the WTE for comparison (LUT table)
-    wte_params = wte.weight.numel() 
-    total_wte = wte_params * 4        #   Bytes/parameter (float32)
+#     #   Get the size of the WTE for comparison (LUT table)
+#     wte_params = wte.weight.numel() 
+#     total_wte = wte_params * 4        #   Bytes/parameter (float32)
 
-    #   Get the size related to the MODEL and WTE together (obtain parameters' amount & related B size)
-    total_params = sum(p.numel() for p in current_model.parameters())
-    total_bytes = total_params * 4
-    total_model = total_bytes - total_wte
+#     #   Get the size related to the MODEL and WTE together (obtain parameters' amount & related B size)
+#     total_params = sum(p.numel() for p in current_model.parameters())
+#     total_bytes = total_params * 4
+#     total_model = total_bytes - total_wte
 
-    def bytes_size(total_bytes):
-        if total_bytes > 1024**3:   # Gigabytes
-            readable_size = f"{total_bytes / 1024**3:.2f} GB"
-        elif total_bytes > 1024**2: # Megabytes
-            readable_size = f"{total_bytes / 1024**2:.2f} MB"
-        else:                       # Kilobytes
-            readable_size = f"{total_bytes / 1024:.2f} KB"
+print_transformer_size_breakdown(current_model)
+# else:
+#     rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
 
-        return readable_size
+# # ----------------------------------------------------------------------
+# #   ATTENTION MAP VISUALIZATION
+# # ----------------------------------------------------------------------
+
+# rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
+
+# #   get a more natural sentence
+# sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
+
+# #   Tokenize the sentence 
+# full_token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=25, tokenizer=current_tokenizer)['token_ids'][0])
+# token_ids_list = [id for id in full_token_ids if id != PAD_IDX]
+# token_ids = torch.tensor(token_ids_list) 
+
+# # Get token names only for the actual content
+# tokens = get_tokens_from_ids(token_ids, current_tokenizer)
+
+# #   Pass the input to the model to get attention weights
+# input_ids_tensor = token_ids.unsqueeze(0).to(DEVICE)
+
+# #   Run the forward pass, ensuring attention is outputted
+# outputs = current_model(input_ids_tensor, output_attentions=True)
+
+# if hasattr(outputs, 'attentions') and outputs.attentions is not None:
+#     attention_layers = outputs.attentions
+#     attention_map_all_heads = attention_layers[-1].squeeze(0).mean(dim=0).detach().cpu().numpy()
     
-    tot_bytes_size = bytes_size(total_bytes)
-    wte_size = bytes_size(total_wte)
-    model_size = bytes_size(total_model)
-    rich.print("\n" + "="*50)
-    rich.print("[bold red]MODEL MEMORY SIZE BREAKDOWN[/bold red]")
-    rich.print(f"TOTAL SIZE OF CHOSEN OPTION: MODEL (parameters) + TOKENIZER (WTE size): [red]{tot_bytes_size}[/red]")
-    rich.print(f"TOTAL SIZE OF TRANSFORMER LAYERS (excluding WTE):[red] {model_size}[/red]")
-    rich.print(f"TOTAL WTE SIZE (vector matrix size):[red] {wte_size}[/red]")
-    rich.print("="*50 + "\n")
-else:
-    rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
-
-# ----------------------------------------------------------------------
-#   ATTENTION MAP VISUALIZATION
-# ----------------------------------------------------------------------
-
-rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
-
-#   get a more natural sentence
-sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
-
-#   Tokenize the sentence 
-full_token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=25, tokenizer=current_tokenizer)['token_ids'][0])
-token_ids_list = [id for id in full_token_ids if id != PAD_IDX]
-token_ids = torch.tensor(token_ids_list) 
-
-# Get token names only for the actual content
-tokens = get_tokens_from_ids(token_ids, current_tokenizer)
-
-#   Pass the input to the model to get attention weights
-input_ids_tensor = token_ids.unsqueeze(0).to(DEVICE)
-
-#   Run the forward pass, ensuring attention is outputted
-outputs = current_model(input_ids_tensor, output_attentions=True)
-
-if hasattr(outputs, 'attentions') and outputs.attentions is not None:
-    attention_layers = outputs.attentions
-    attention_map_all_heads = attention_layers[-1].squeeze(0).mean(dim=0).detach().cpu().numpy()
+#     #   Clamp to the actual sequence length (ignore padding)
+#     actual_len = len(tokens)
+#     attention_map_plot = attention_map_all_heads[:actual_len, :actual_len]
     
-    #   Clamp to the actual sequence length (ignore padding)
-    actual_len = len(tokens)
-    attention_map_plot = attention_map_all_heads[:actual_len, :actual_len]
-    
-    def plot_transformer_attention_map(attention_map, labels):
-        fig, ax = plt.subplots(figsize = (6, 3), dpi=300) 
+#     def plot_transformer_attention_map(attention_map, labels):
+#         fig, ax = plt.subplots(figsize = (6, 3), dpi=300) 
         
-        im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
-        ax.grid(False)
+#         im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
+#         ax.grid(False)
         
-        ax.set_yticks(np.arange(len(labels)))
-        ax.set_yticklabels(labels, fontsize=3) 
-        ax.set_xticks(np.arange(len(labels)))
-        ax.set_xticklabels(labels, fontsize=3) 
+#         ax.set_yticks(np.arange(len(labels)))
+#         ax.set_yticklabels(labels, fontsize=3) 
+#         ax.set_xticks(np.arange(len(labels)))
+#         ax.set_xticklabels(labels, fontsize=3) 
         
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+#         plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
         
-        ax.set_ylabel("Query (Q)", fontsize=7) 
-        ax.set_xlabel("Key (K)", fontsize=7) 
+#         ax.set_ylabel("Query (Q)", fontsize=7) 
+#         ax.set_xlabel("Key (K)", fontsize=7) 
         
-        cbar = fig.colorbar(im, 
-                            fraction=0.046,     #   fraction and pad slightly adjusted for bottom position
-                            pad=0.04, 
-                            location='right',   #   Place color bar horizontally at the bottom
-                            shrink=0.75)        #   Shrink the color bar size
+#         cbar = fig.colorbar(im, 
+#                             fraction=0.046,     #   fraction and pad slightly adjusted for bottom position
+#                             pad=0.04, 
+#                             location='right',   #   Place color bar horizontally at the bottom
+#                             shrink=0.75)        #   Shrink the color bar size
         
-        cbar.ax.tick_params(labelsize=4)
-        fig.tight_layout()
-        return fig, ax
+#         cbar.ax.tick_params(labelsize=4)
+#         fig.tight_layout()
+#         return fig, ax
 
-    fig, ax = plot_transformer_attention_map(attention_map_plot, tokens)
-    ax.set_title(f"Attention Map (Arch: {arch_settings['name']}, Token: {token_settings['name']})", fontsize=8)
-    plt.show()
+#     fig, ax = plot_transformer_attention_map(attention_map_plot, tokens)
+#     ax.set_title(f"Attention Map (Arch: {arch_settings['name']}, Token: {token_settings['name']})", fontsize=8)
+#     plt.show()
     
-else:
-    rich.print("[bold red]ERROR:[/bold red] Transformer model did not return attention weights. Cannot visualize attention map.")
+# else:
+#     rich.print("[bold red]ERROR:[/bold red] Transformer model did not return attention weights. Cannot visualize attention map.")
