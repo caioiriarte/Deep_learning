@@ -7,7 +7,7 @@ import math
 from functools import partial
 from pathlib import Path
 from tqdm import tqdm
-import rich
+import rich, sys
 from typing import List, Tuple, Dict, Any, Union
 import matplotlib
 matplotlib.use('TkAgg')  # Use non-interactive backend
@@ -30,6 +30,7 @@ from transformers import (
 from torch.utils.data import DataLoader
 import pickle
 import time
+import rich
 
 from byte_level_tokenizer import ByteLevelTokenizer
 
@@ -75,14 +76,23 @@ sns.set_theme()
 # ARCHITECTURE = 1: Base (GloVe-compatible/Random Init)
 # ARCHITECTURE = 2: BERT-config (Random Init)
 # ARCHITECTURE = 3: GPT-2-config (Random Init)
-ARCHITECTURE = 3
+ARCHITECTURE = int(sys.argv[1])
 
 # --- 2. Choose the Tokenization Scheme ---
 # TOKENIZER = 1: GloVe Tokenizer
 # TOKENIZER = 2: BERT WordPiece Tokenizer
 # TOKENIZER = 3: GPT-2 BPE Tokenizer
 # TOKEN = 4: Byte-level encoding
-TOKENIZER = 4
+TOKENIZER = int(sys.argv[2])
+
+# Dataset options:
+
+# 1: AG News dataset
+# 2: Tiny Shakespeare dataset
+# 3: FineWeb2 dataset
+DATASET_OPTION = int(sys.argv[3])
+max_dataset_size = int(sys.argv[4])
+
 
 # Configuration mapping for architectures
 ARCH_CONFIGS = {
@@ -177,7 +187,6 @@ current_embed_dim = current_model.config.hidden_size
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
 NUM_EPOCHS = 1
-max_dataset_size = 10#1000000
 max_seq_size = 10 
 rich.print(f"Device: [red]{DEVICE}[/red] | Model Class: [red]{current_model.__class__.__name__}[/red] \
 Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
@@ -381,13 +390,6 @@ def print_transformer_size_breakdown(model: PreTrainedModel):
 # ----------------------------------------------------------------------
 #   DATASET PREPARATION
 # ----------------------------------------------------------------------
-
-# Dataset options:
-
-# 1: AG News dataset
-# 2: Tiny Shakespeare dataset
-# 3: FineWeb2 dataset
-DATASET_OPTION = 1
 
 if DATASET_OPTION == 1:
     rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
@@ -645,124 +647,116 @@ rich.print(f"\nTokenizer evaluation on '{eval_sentence}'")
 # #   NORMALIZED LENGTH SCORE (NLS) EVALUATION
 # # ----------------------------------------------------------------------
 
-# rich.print("\n[bold blue]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold blue]\n")
-# """ The higher the NLS value, the worse the option is, in principle. """
+rich.print("\n[bold blue]STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...[/bold blue]\n")
+""" The higher the NLS value, the worse the option is, in principle. """
+# Count words (W) and characters (C)
+nls_word_count = len(eval_sentence.split())
+nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and comma
 
-# # Count words (W) and characters (C)
-# nls_word_count = len(eval_sentence.split())
-# nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) # Count characters excluding spaces and commas
-
-# # We use a known efficient tokenizer like Llama for the NLS (Reference) metric
-# t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
-
-# # A. Tokenize with the CURRENT Tokenizer
-# current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
-# non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
-# actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
-
-# # B. Calculate NLS_W (Word-Normalized Length)
-# token_count = len(actual_tokens)
-# nls_w = token_count / nls_word_count
-# rich.print(f"NLS_w: [green]{nls_w:.4f}[/green] (Tokens per Word)")
-
-# # C. Calculate NLS_C (Character-Normalized Length)
-# nls_c = token_count / nls_char_count
-# rich.print(f"NLS_c: [green]{nls_c:.4f}[/green] (Tokens per Character)")
-
-# # D. Calculate NLS (Reference)
-# if t5_tokenizer is not None:
-#     # Tokenize with the REFERENCE Tokenizer
-#     t5_tokenization = t5_tokenizer(
-#         eval_sentence,
-#         max_length=100,
-#         padding=False,
-#         truncation=True,
-#         return_attention_mask=False
-#     )
-#     # Exclude special tokens like BOS/EOS/Pad if they were included
-#     t5_token_ids = t5_tokenization["input_ids"]
-#     t5_token_count = len(t5_token_ids)
-    
-#     # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
-#     nls_ref = token_count / t5_token_count
-
-#     rich.print(f"NLS (Reference: T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
-
-
-# rich.print("\n[bold blue]NLS Evaluation Complete.[/bold blue]")
+# We use a known efficient tokenizer like Llama for the NLS (Reference) metric
+t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
+                                             
+# A. Tokenize with the CURRENT Tokenizer
+current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
+non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
+actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
+                                    
+# B. Calculate NLS_W (Word-Normalized Length)
+token_count = len(actual_tokens)
+nls_w = token_count / nls_word_count
+rich.print(f"NLS_w: [green]{nls_w:.4f}[/green] (Tokens per Word)")
+           
+# C. Calculate NLS_C (Character-Normalized Length)
+nls_c = token_count / nls_char_count
+rich.print(f"NLS_c: [green]{nls_c:.4f}[/green] (Tokens per Character)")
+           
+# D. Calculate NLS (Reference)
+if t5_tokenizer is not None:
+    # Tokenize with the REFERENCE Tokenizer
+    t5_tokenization = t5_tokenizer(
+        eval_sentence,
+        max_length=100,
+        padding=False,
+        truncation=True,
+        return_attention_mask=False
+    )
+    # Exclude special tokens like BOS/EOS/Pad if they were included
+    t5_token_ids = t5_tokenization["input_ids"]
+    t5_token_count = len(t5_token_ids)  
+    # Calculate NLS as the ratio of the tested tokenizer's token count to the reference tokenizer's count
+    nls_ref = token_count / t5_token_count
+    rich.print(f"NLS (Reference: T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
+               
+rich.print("\n[bold blue]NLS Evaluation Complete.[/bold blue]")
 
 # # ----------------------------------------------------------------------
 # #   SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION
 # # ----------------------------------------------------------------------
 
-# rich.print("\n[bold blue]STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...[/bold blue]\n")
+rich.print("\n[bold blue]STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...[/bold blue]\n")
 
-# """
-#     The subword fertility evaluates the amount of tokens generated per word. A fertility of 1.0 is
-#     ideal. Normally, the SF value is >= 1.0
+"""
+    The subword fertility evaluates the amount of tokens generated per word. A fertility of 1.0 is
+    ideal. Normally, the SF value is >= 1.0
 
-#     Another metric that is employed is the proportion of continued words which indicates the percentage
-#     of words that are split into multiple tokens. 0 is an ideal value for the CW proportion.
-# """
+    Another metric that is employed is the proportion of continued words which indicates the percentage
+    of words that are split into multiple tokens. 0 is an ideal value for the CW proportion.
+"""
 
-# def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
-#     # Count words using simple space splitting (as per standard practice for these metrics)
-#     total_words = len(sentence.split())
-#     total_tokens = len(tokens)
+def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) -> Tuple[float, float]:
+    # Count words using simple space splitting (as per standard practice for these metrics)
+    total_words = len(sentence.split())
+    total_tokens = len(tokens)
     
-#     if total_words == 0:
-#         return 0.0, 0.0
+    if total_words == 0:
+        return 0.0, 0.0
         
-#     fertility = total_tokens / total_words
+    fertility = total_tokens / total_words
     
-#     #   Calculate Proportion of Continued Words (PCW)
-#     split_words_count = 0
-#     in_split_word = False
+    #   Calculate Proportion of Continued Words (PCW)
+    split_words_count = 0
+    in_split_word = False
     
-#     # Check for GloVe/Word-based tokenizer
-#     if token_settings['name'] == 'GloVe':
-#         # GloVe is strictly word-based, so no words are split (Fertility = 1.0, PCW = 0.0)
-#         return 1.0, 0.0
+    # Check for GloVe/Word-based tokenizer
+    if token_settings['name'] == 'GloVe':
+        # GloVe is strictly word-based, so no words are split (Fertility = 1.0, PCW = 0.0)
+        return 1.0, 0.0
     
-#     for i, token in enumerate(tokens):
-#         if token_settings['name'] == 'BERT_WP':
-#             if token.startswith('##'):
-#                 # Token is a continuation of a previous word
-#                 if not in_split_word:
-#                     # Found the first continuation token for a split word
-#                     split_words_count += 1
-#                     in_split_word = True
-#             else:
-#                 # Token is a new word (or the start of a split word)
-#                 in_split_word = False
+    for i, token in enumerate(tokens):
+        if token_settings['name'] == 'BERT_WP':
+            if token.startswith('##'):
+                # Token is a continuation of a previous word
+                if not in_split_word:
+                    # Found the first continuation token for a split word
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                # Token is a new word (or the start of a split word)
+                in_split_word = False
                 
-#         elif token_settings['name'] == 'GPT2_BPE':
-#             # Check for the space marker 'Ġ' (which signifies the start of a new word)
-#             if i > 0 and not token.startswith('Ġ'):
-#                 # Token is a continuation of the previous word
-#                 if not in_split_word:
-#                     # Found the first continuation token for a split word
-#                     split_words_count += 1
-#                     in_split_word = True
-#             else:
-#                 # Token is a new word (or the first token of the sequence)
-#                 in_split_word = False
+        elif token_settings['name'] == 'GPT2_BPE':
+            # Check for the space marker 'Ġ' (which signifies the start of a new word)
+            if i > 0 and not token.startswith('Ġ'):
+                # Token is a continuation of the previous word
+                if not in_split_word:
+                    # Found the first continuation token for a split word
+                    split_words_count += 1
+                    in_split_word = True
+            else:
+                # Token is a new word (or the first token of the sequence)
+                in_split_word = False
 
-#     #   PCW = (Number of split words) / (Total number of words)
-#     proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
-    
-#     # Note: Split words count in this methodology starts counting *after* the initial word part
-#     # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
-    
-#     return fertility, proportion_continued_words
-
-
-# fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
-
-# rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
-# rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
-
-# rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
+    #   PCW = (Number of split words) / (Total number of words)
+    proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
+  
+    # Note: Split words count in this methodology starts counting *after* the initial word part
+    # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
+  
+    return fertility, proportion_continued_words
+fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
+rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
+rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
+rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
 
 
 # # ----------------------------------------------------------------------

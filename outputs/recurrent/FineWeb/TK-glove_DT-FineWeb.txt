@@ -1,0 +1,60 @@
+Using TOKENIZER 1: Original GloVe Tokenizer
+Device: cuda | Vocab Size: 250003 | Embed Dim: 50 | PAD IDX: 2
+Using FineWeb2 Dataset: 100000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['text', 'token_ids'],
+        num_rows: 100000
+    })
+    test: Dataset({
+        features: ['text', 'token_ids'],
+        num_rows: 40970
+    })
+})
+Initializing Embeddings and Proj with GloVe Vectors.
+STARTING TRAINING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.0187 | Test BPB: 0.0261 bits/byte | 
+Compression Ratio: 0.0033
+
+Compression baselines on TEST corpus (preprocessed text):
+  Raw size: 109823432 bytes
+  GZIP: 45681317 bytes | 3.3276 bits/byte | ratio: 0.4160
+  BZ2 : 38661535 bytes | 2.8163 bits/byte | ratio: 0.3520
+  LZMA: 34118140 bytes | 2.4853 bits/byte | ratio: 0.3107
+
+
+==================================================
+TRAINING SUMMARY REPORT (RNN)
+  Total Training Time: 314.29 seconds
+  Final Avg Training Loss: 5.4931
+==================================================
+
+STARTING TESTING...
+Testing Complete. Average Test Loss: 5.3903
+
+==================================================
+STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+Word Count: 20 | Char Count: 76
+  NLS_w (Tokens per Word): 0.5000
+  NLS_c (Tokens per Character): 0.1316
+  NLS (Reference T/R): 0.4000 (Efficiency vs. t5)
+
+Subword Metrics:
+  Subword Fertility (Ideal: 1.0): 1.0000
+  Proportion of Continued Words (Ideal: 0.0): 0.0000
+Tokenizer Evaluation Complete.
+==================================================
+
+
+==================================================
+RNN MODEL SIZE BREAKDOWN
+
+  Total params      : [25,347,100 (96.69 MB)
+  Embeddings (WTE)  : 12,500,150 (47.68 MB)
+  Output head (proj): 12,500,150 (47.68 MB)
+  Core (LSTMs only) : 346,800 (1.32 MB)
+==================================================
+

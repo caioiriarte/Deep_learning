@@ -1,0 +1,60 @@
+Using TOKENIZER 2: HuggingFace WordPiece (BERT-base-uncased)
+Device: cuda | Vocab Size: 30522 | Embed Dim: 240 | PAD IDX: 100
+Using Tiny Shakespeare Dataset: 30000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 472
+    })
+    test: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 49
+    })
+})
+Randomly Initializing Embeddings/Proj (GloVe not used).
+STARTING TRAINING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.0312 | Test BPB: 0.0443 bits/byte | 
+Compression Ratio: 0.0055
+
+Compression baselines on TEST corpus (preprocessed text):
+  Raw size: 99131 bytes
+  GZIP: 36805 bytes | 2.9702 bits/byte | ratio: 0.3713
+  BZ2 : 35911 bytes | 2.8981 bits/byte | ratio: 0.3623
+  LZMA: 34708 bytes | 2.8010 bits/byte | ratio: 0.3501
+
+
+==================================================
+TRAINING SUMMARY REPORT (RNN)
+  Total Training Time: 1.42 seconds
+  Final Avg Training Loss: 8.0838
+==================================================
+
+STARTING TESTING...
+Testing Complete. Average Test Loss: 6.9025
+
+==================================================
+STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+Word Count: 20 | Char Count: 76
+  NLS_w (Tokens per Word): 0.5000
+  NLS_c (Tokens per Character): 0.1316
+  NLS (Reference T/R): 0.4000 (Efficiency vs. t5)
+
+Subword Metrics:
+  Subword Fertility (Ideal: 1.0): 0.5000
+  Proportion of Continued Words (Ideal: 0.0): 0.0000
+Tokenizer Evaluation Complete.
+==================================================
+
+
+==================================================
+RNN MODEL SIZE BREAKDOWN
+
+  Total params      : [22,516,800 (85.89 MB)
+  Embeddings (WTE)  : 7,325,280 (27.94 MB)
+  Output head (proj): 7,325,280 (27.94 MB)
+  Core (LSTMs only) : 7,866,240 (30.01 MB)
+==================================================
+

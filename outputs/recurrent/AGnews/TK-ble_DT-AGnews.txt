@@ -1,0 +1,60 @@
+Using TOKENIZER 4: Byte-level encoding
+Device: cuda | Vocab Size: 258 | Embed Dim: 240 | PAD IDX: 256
+Using AG News Dataset: 1000000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['text', 'label', 'token_ids'],
+        num_rows: 120000
+    })
+    test: Dataset({
+        features: ['text', 'label', 'token_ids'],
+        num_rows: 7600
+    })
+})
+Randomly Initializing Embeddings/Proj (GloVe not used).
+STARTING TRAINING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.1081 | Test BPB: 0.1481 bits/byte | 
+Compression Ratio: 0.0185
+
+Compression baselines on TEST corpus (preprocessed text):
+  Raw size: 1494718 bytes
+  GZIP: 670612 bytes | 3.5892 bits/byte | ratio: 0.4487
+  BZ2 : 538176 bytes | 2.8804 bits/byte | ratio: 0.3601
+  LZMA: 539984 bytes | 2.8901 bits/byte | ratio: 0.3613
+
+
+==================================================
+TRAINING SUMMARY REPORT (RNN)
+  Total Training Time: 222.24 seconds
+  Final Avg Training Loss: 2.4681
+==================================================
+
+STARTING TESTING...
+Testing Complete. Average Test Loss: 2.2437
+
+==================================================
+STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+Word Count: 20 | Char Count: 76
+  NLS_w (Tokens per Word): 0.5000
+  NLS_c (Tokens per Character): 0.1316
+  NLS (Reference T/R): 0.4000 (Efficiency vs. t5)
+
+Subword Metrics:
+  Subword Fertility (Ideal: 1.0): 0.5000
+  Proportion of Continued Words (Ideal: 0.0): 0.0000
+Tokenizer Evaluation Complete.
+==================================================
+
+
+==================================================
+RNN MODEL SIZE BREAKDOWN
+
+  Total params      : [7,990,080 (30.48 MB)
+  Embeddings (WTE)  : 61,920 (241.88 KB)
+  Output head (proj): 61,920 (241.88 KB)
+  Core (LSTMs only) : 7,866,240 (30.01 MB)
+==================================================
+

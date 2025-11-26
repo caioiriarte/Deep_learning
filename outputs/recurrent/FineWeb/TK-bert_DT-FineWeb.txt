@@ -1,0 +1,60 @@
+Using TOKENIZER 2: HuggingFace WordPiece (BERT-base-uncased)
+Device: cuda | Vocab Size: 30522 | Embed Dim: 240 | PAD IDX: 100
+Using FineWeb2 Dataset: 100000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['text', 'token_ids'],
+        num_rows: 100000
+    })
+    test: Dataset({
+        features: ['text', 'token_ids'],
+        num_rows: 40970
+    })
+})
+Randomly Initializing Embeddings/Proj (GloVe not used).
+STARTING TRAINING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.0189 | Test BPB: 0.0263 bits/byte | 
+Compression Ratio: 0.0033
+
+Compression baselines on TEST corpus (preprocessed text):
+  Raw size: 109823432 bytes
+  GZIP: 45681317 bytes | 3.3276 bits/byte | ratio: 0.4160
+  BZ2 : 38661535 bytes | 2.8163 bits/byte | ratio: 0.3520
+  LZMA: 34118140 bytes | 2.4853 bits/byte | ratio: 0.3107
+
+
+==================================================
+TRAINING SUMMARY REPORT (RNN)
+  Total Training Time: 264.36 seconds
+  Final Avg Training Loss: 5.5210
+==================================================
+
+STARTING TESTING...
+Testing Complete. Average Test Loss: 5.4386
+
+==================================================
+STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+Word Count: 20 | Char Count: 76
+  NLS_w (Tokens per Word): 0.5000
+  NLS_c (Tokens per Character): 0.1316
+  NLS (Reference T/R): 0.4000 (Efficiency vs. t5)
+
+Subword Metrics:
+  Subword Fertility (Ideal: 1.0): 0.5000
+  Proportion of Continued Words (Ideal: 0.0): 0.0000
+Tokenizer Evaluation Complete.
+==================================================
+
+
+==================================================
+RNN MODEL SIZE BREAKDOWN
+
+  Total params      : [22,516,800 (85.89 MB)
+  Embeddings (WTE)  : 7,325,280 (27.94 MB)
+  Output head (proj): 7,325,280 (27.94 MB)
+  Core (LSTMs only) : 7,866,240 (30.01 MB)
+==================================================
+

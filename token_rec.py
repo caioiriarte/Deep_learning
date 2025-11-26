@@ -24,7 +24,7 @@ import pickle
 import time
 import gzip
 import bz2
-import lzma
+import lzma, sys
 
 from byte_level_tokenizer import ByteLevelTokenizer
 
@@ -73,7 +73,20 @@ sns.set_theme()
 # TOKEN = 2: HuggingFace WordPiece (BERT-base-uncased)
 # TOKEN = 3: HuggingFace BPE (GPT-2)
 # TOKEN = 4: Byte-level encoding
-TOKEN = 4
+TOKEN = int(sys.argv[1])
+
+
+# ----------------------------------------------------------------------
+
+# Dataset options:
+
+# 1: AG News dataset (1000000)
+# 2: Tiny Shakespeare dataset (30000)
+# 3: FineWeb2 dataset (100000)
+
+DATASET_OPTION = int(sys.argv[2])
+max_dataset_size = int(sys.argv[3])
+
 
 # Global variables for conditional model setup
 current_tokenizer = None
@@ -129,7 +142,6 @@ else:
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 BATCH_SIZE = 8
 NUM_EPOCHS = 1
-max_dataset_size = 10#1000000
 max_seq_size = 10
 rich.print(f"Device: [red]{DEVICE}[/red] | Vocab Size: [red]{current_vocab_size}[/red] | Embed Dim: [red]{current_embed_dim}[/red] | PAD IDX: [red]{PAD_IDX}[/red]")
 
@@ -420,14 +432,6 @@ def print_rnn_size_breakdown(rnn: RNNLM):
 # ----------------------------------------------------------------------
 # 5. DATASET PREPARATION
 # ----------------------------------------------------------------------
-
-# Dataset options:
-
-# 1: AG News dataset
-# 2: Tiny Shakespeare dataset
-# 3: FineWeb2 dataset
-
-DATASET_OPTION = 1
 
 if DATASET_OPTION == 1:
     rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")

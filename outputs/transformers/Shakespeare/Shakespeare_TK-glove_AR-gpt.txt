@@ -1,0 +1,49 @@
+ARCHITECTURE: GPT2_Decoder_Random (3) TOKENIZER: GloVe (1)
+Using fixed GloVe Vocab Size: 250003
+GPT2_Decoder_Random: Using RANDOM weights (vocab size adjusted).
+Device: cuda | Model Class: GPT2LMHeadModel Vocab Size: 250003 | Embed Dim: 240 
+| PAD IDX: 2
+Using Tiny Shakespeare Dataset: 30000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 472
+    })
+    test: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 49
+    })
+})
+STARTING FINE-TUNING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.0539 | Test BPB: 0.0758 bits/byte | 
+Compression Ratio: 0.0095
+Total Training Time: 3.98 seconds
+
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+
+STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...
+
+NLS_w: 0.5000 (Tokens per Word)
+NLS_c: 0.1316 (Tokens per Character)
+NLS (Reference: T/R): 0.4000 (Efficiency vs. t5)
+
+NLS Evaluation Complete.
+
+STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...
+
+Subword Fertility (Ideal: 1.0): 1.0000
+Proportion of Continued Words (Ideal: 0.0): 0.0000
+
+Subword Fertility Metrics Complete.
+
+==================================================
+TRANSFORMER MODEL SIZE BREAKDOWN
+
+  Total params      : 67,884,480 (258.96 MB)
+  Embeddings (WTE)  : 60,000,720 (228.88 MB)
+  Output head       : 0 (0.00 KB)
+  Core (blocks only): 7,883,760 (30.07 MB)
+==================================================
+

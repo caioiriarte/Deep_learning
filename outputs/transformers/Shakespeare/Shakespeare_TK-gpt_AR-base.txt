@@ -1,0 +1,49 @@
+ARCHITECTURE: Base_Random (1) TOKENIZER: GPT2_BPE (3)
+Using TOKENIZER 3: HuggingFace BPE (GPT-2)
+Base_Random: Using RANDOM weights (vocab size adjusted).
+Device: cuda | Model Class: BertForMaskedLM Vocab Size: 50257 | Embed Dim: 240 |
+PAD IDX: 50256
+Using Tiny Shakespeare Dataset: 30000 samples
+DatasetDict({
+    train: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 472
+    })
+    test: Dataset({
+        features: ['Text', 'token_ids'],
+        num_rows: 49
+    })
+})
+STARTING FINE-TUNING...
+-- Epoch 1/1 --
+Epoch 1 Complete. | Perplexity/char: 1.0471 | Test BPB: 0.0664 bits/byte | 
+Compression Ratio: 0.0083
+Total Training Time: 1.84 seconds
+
+Tokenizer evaluation on 'A dog is an amazing animal with a heart of a true 
+lifemate of men, and with many other qualities'
+
+STARTING NORMALIZED LENGTH SCORE (NLS) EVALUATION...
+
+NLS_w: 0.5000 (Tokens per Word)
+NLS_c: 0.1316 (Tokens per Character)
+NLS (Reference: T/R): 0.4000 (Efficiency vs. t5)
+
+NLS Evaluation Complete.
+
+STARTING SUBWORD FERTILITY (SF) AND CONTINUED WORDS (CW) EVALUATION...
+
+Subword Fertility (Ideal: 1.0): 0.5000
+Proportion of Continued Words (Ideal: 0.0): 0.0000
+
+Subword Fertility Metrics Complete.
+
+==================================================
+TRANSFORMER MODEL SIZE BREAKDOWN
+
+  Total params      : 20,270,241 (77.32 MB)
+  Embeddings (WTE)  : 12,061,680 (46.01 MB)
+  Output head       : 0 (0.00 KB)
+  Core (blocks only): 8,208,561 (31.31 MB)
+==================================================
+
