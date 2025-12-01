@@ -17,3 +17,64 @@ This project will investigate different tokenization schemes for language models
 * (Optional extension) Explore generalization to non-text data, such as byte-level modeling of structured files.
 
 *This project will be supervised by TA Anders Vestergaard Nørskov (aveno@dtu.dk).*
+
+---
+
+### Running Scripts (RNNLM Model and Transformer predefined models)
+
+The project uses two main Python files to train and evaluate language models using different tokenization and architecture configurations. Those files are `token_rec.py` and `token_trans.py`. Both scripts require four command-line arguments to specify the experiment configuration: the architecture/model type, the tokenizer, the dataset, and the maximum number of samples to use.
+
+<br>
+
+### `token_rec.py` (RNN Language Model)
+
+The file `token_rec.py` (referring to the RNN language model) is designed to run the simple RNN (LSTM-based) architecture on a chosen dataset and tokenizer. To run the RNN-based language model script (`token_rec.py`), you must provide three positional arguments to define the experiment setup: `TOKEN` (Tokenizer ID), `DATASET_OPTION` (Dataset ID), and `max_dataset_size` (number of samples).
+
+**Execution in Terminal:**
+
+```bash
+python token_rec.py <TOKEN> <DATASET_OPTION> <max_dataset_size>
+```
+
+<br>
+
+### `token_rec.py` (RNN Language Model)
+
+The file `token_trans.py` (referring to the Transformer language model) is designed to instantiate, train, and evaluate pre-defined Transformer architectures (like BERT or GPT-2 configuration) using a corresponding tokenizer and dataset detailed. To run the RNN-based language model script (`token_rec.py`), you must provide three positional arguments to define the experiment setup: `MODEL` (transformer prebuilt models), `TOKEN` (Tokenizer ID), `DATASET_OPTION` (Dataset ID), and `max_dataset_size` (number of samples).
+
+**Execution in Terminal:**
+
+```bash
+python token_trans.py <MODEL> <TOKEN> <DATASET_OPTION> <max_dataset_size>
+```
+
+<br>
+
+### Models, Tokenizers & Datasets employed
+
+**Models (Random Weight Initialization)**
+
+* Base (GloVe-compatible)
+* BERT-config
+* GPT-2-config
+
+**Tokenizers**
+
+* GloVe Tokenizer
+* BERT WordPiece Tokenizer
+* GPT-2 BPE Tokenizer
+* Byte-level encoding
+
+**Datasets**
+
+* AG News dataset
+* Tiny Shakespeare dataset
+* FineWeb2 dataset
+
+---
+
+**Group 86 Integrants**
+
+* Caio Lorenzo Iriarte Salles (s250821)
+* Andreas Riposati (s153426)
+* Carlos Fernández de Heredia Liger (s243308)

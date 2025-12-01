@@ -19,7 +19,6 @@ import transformers
 import tokenizers
 import datasets
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from torch.utils.data import DataLoader
 import pickle
 import time
 import gzip
@@ -83,7 +82,6 @@ TOKEN = int(sys.argv[1])
 # 1: AG News dataset (1000000)
 # 2: Tiny Shakespeare dataset (30000)
 # 3: FineWeb2 dataset (100000)
-
 DATASET_OPTION = int(sys.argv[2])
 max_dataset_size = int(sys.argv[3])
 
@@ -158,10 +156,10 @@ def custom_collate_fn(batch):
     Collate function to extract 'token_ids' from the dataset batch 
     and convert them into a single long tensor.
     """
-    # Ensure all tokens are padded to the max length in the batch if needed.
-    # The dataset.map already truncates/pads based on `max_seq_size` if a transformer tokenizer is used.
+    #   Ensure all tokens are padded to the max length in the batch if needed.
     token_ids_list = [item['token_ids'] for item in batch]
-    # Stacks the list of token lists into a single (Batch_Size, Max_Seq_Length) tensor
+
+    #   Stacks the list of token lists into a single (Batch_Size, Max_Seq_Length) tensor
     return torch.tensor(token_ids_list, dtype=torch.long) 
 
 
@@ -268,12 +266,14 @@ def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) 
     proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
     return fertility, proportion_continued_words
 
+
 def count_chars(sample, key):
     # Save text
     text = sample[key]
     # preprocess text by removing spaces and commas
     text = text.replace(" ", "").replace(",", "")
     return len(text)
+
 
 def count_bytes(sample, key, encoding="utf-8"):
     """
@@ -437,11 +437,13 @@ if DATASET_OPTION == 1:
     rich.print(f"[bold blue]Using AG News Dataset: {max_dataset_size} samples[/bold blue]")
     # load AG News, take a subset of `max_dataset_size` rows and tokenize
     dataset = datasets.load_dataset("ag_news")
-    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) \
+                                    if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
 elif DATASET_OPTION == 2:
     rich.print(f"[bold blue]Using Tiny Shakespeare Dataset: {max_dataset_size} samples[/bold blue]")
     dataset = datasets.load_dataset("Trelis/tiny-shakespeare")
-    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
+    dataset = datasets.DatasetDict({split: dset.shuffle(seed=42).select(range(max_dataset_size)) \
+                                    if len(dset) > max_dataset_size else dset for split, dset in dataset.items()})
 elif DATASET_OPTION == 3:
     rich.print(f"[bold blue]Using FineWeb2 Dataset: {max_dataset_size} samples[/bold blue]")
     splits = ["train", "test"]
@@ -482,7 +484,7 @@ dataset = dataset.map(
 rich.print(dataset)
 
 
-# Create the DataLoader for the training split
+#   Create the DataLoader for the training split
 train_dataloader = torch.utils.data.DataLoader(
     dataset["train"],
     batch_size=BATCH_SIZE,
@@ -508,14 +510,14 @@ if checkpoint_file.exists():
     # checkpoint_file.unlink() # delete the checkpoint by un-commenting this line
     rnn.load_state_dict(torch.load(checkpoint_file, map_location="cpu"))
 
-# Send it to the device
+#   Send it to the device
 rnn = rnn.to(DEVICE)
 
-# 1. Define the Loss Criterion
+#   1. Define the Loss Criterion
 criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX)
 criterion = criterion.to(DEVICE)
 
-# 2. Define the Optimizer
+#   2. Define the Optimizer
 optimizer = torch.optim.Adam(rnn.parameters(), lr=1e-3)
 
 
@@ -524,7 +526,7 @@ optimizer = torch.optim.Adam(rnn.parameters(), lr=1e-3)
 # ----------------------------------------------------------------------
 rich.print("[bold green]STARTING TRAINING...[/bold green]")
 
-# Pre-calculate total characters in test set for BPC calculation
+#   Pre-calculate total characters in test set for BPC calculation
 total_test_chars = sum(
     count_chars(sample, key="Text" if DATASET_OPTION == 2 else "text")
     for sample in dataset["test"]
@@ -533,9 +535,9 @@ total_test_bytes = sum(
     count_bytes(sample, key="Text" if DATASET_OPTION == 2 else "text")
     for sample in dataset["test"]
 )
-total_test_bits = total_test_bytes * 8 # assuming 8 bits per byte
+total_test_bits = total_test_bytes * 8
 
-# Prepare the full test text for compression baselines
+#   Prepare the full test text for compression baselines
 test_text = "".join(
     sample["Text" if DATASET_OPTION == 2 else "text"].replace(" ", "").replace(",", "")
     for sample in dataset["test"]
@@ -543,16 +545,16 @@ test_text = "".join(
 test_text_bytes = test_text.encode("utf-8")
 
 start_time = time.time()
-accumulated_testing_duration = 0.0 # to track total testing time
-
+accumulated_testing_duration = 0.0
 
 train_loss_per_epoch = []
 test_loss_per_epoch = []
+final_total_training_tokens = 0
 
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
     
-    # Set model to training mode
+    #   Set model to training mode
     rnn.train() 
     total_loss = 0
     total_tokens = 0
@@ -561,33 +563,35 @@ for epoch in range(NUM_EPOCHS):
         
         token_ids_batch = token_ids_batch.to(DEVICE) 
 
-        # 1. Zero the gradients 
+        #   1. Zero the gradients 
         optimizer.zero_grad() 
 
-        # 2. Forward Pass: (B, T) -> (B, T, V). 
+        #   2. Forward Pass: (B, T) -> (B, T, V). 
         logits = rnn(token_ids_batch)
         
-        # 3. Prepare Logits (B * (T-1), V) and Targets (B * (T-1))
+        #   3. Prepare Logits (B * (T-1), V) and Targets (B * (T-1))
         logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
         targets = token_ids_batch[:, 1:].reshape(-1)
         
-        # 4. Calculate Loss
+        #   4. Calculate Loss
         loss = criterion(logits_flat, targets)
         
-        # weight the loss by the number of non-PAD tokens
+        #   weight the loss by the number of non-PAD tokens
         batch_tokens = (targets != PAD_IDX).sum().item()
         total_loss += loss.item() * batch_tokens
         total_tokens += batch_tokens
 
-        # 5. Backward Pass and Optimization
+        #   5. Backward Pass and Optimization
         loss.backward()
         optimizer.step()
         
     avg_loss = total_loss / total_tokens
     train_loss_per_epoch.append(avg_loss)
 
-    # TESTING PHASE at the end of each epoch
-    # Do not time testing phase
+    final_total_training_tokens += total_tokens
+
+    #   TESTING PHASE at the end of each epoch
+    #   Do not time testing phase
     start_testing_time = time.time()
 
     rnn.eval()
@@ -640,32 +644,35 @@ for epoch in range(NUM_EPOCHS):
     avg_test_loss = total_test_loss / total_test_tokens
     test_loss_per_epoch.append(avg_test_loss)
 
-    # BITS PER CHARACTER (BPC) CALCULATION
+    #   BITS PER CHARACTER (BPC) CALCULATION
     #---------------------------------------
     total_test_nll_nats = total_test_loss
-    # Convert to bits
     total_test_nll_bits = total_test_nll_nats / math.log(2.0)
     # BPC = total bits / nº of characters in test set
     test_bpc = total_test_nll_bits / total_test_chars
+
     #---------------------------------------
-    # BITS PER BYTE (BPB) CALCULATION
+    #   BITS PER BYTE (BPB) CALCULATION
     bpb_model = total_test_nll_bits / total_test_bytes
+
     #---------------------------------------
-    # COMPRESSION RATIO ESTIMATION
-    # Assuming 8 bits per byte in original text
+    #   COMPRESSION RATIO ESTIMATION
     compression_ratio_model = total_test_nll_bits / total_test_bits
+
     #---------------------------------------
-    # NLL per char
+    #   NLL per char
     nll_per_char_nats = total_test_loss / total_test_chars
+
     #---------------------------------------
-    # PERPLEXITY PER CHARACTER 
+    #   PERPLEXITY PER CHARACTER 
     perplexity_per_char = math.exp(nll_per_char_nats)
+
     #---------------------------------------
-    # ENTROPY RATE per char
+    #   ENTROPY RATE per char
     entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
     entropy_rate_bits_per_token = entropy_rate_nats_per_token / math.log(2.0)
 
-    # Convert to "per character" using the total number of characters in the test corpus
+    #   Convert to "per character" using the total number of characters in the test corpus
     entropy_rate_bits_per_char = (total_entropy_nats / math.log(2.0)) / total_test_chars
     #---------------------------------------
 
@@ -689,8 +696,8 @@ for epoch in range(NUM_EPOCHS):
 
 
 end_time = time.time()
-total_time = end_time - start_time - accumulated_testing_duration # exclude testing time
-
+total_time = end_time - start_time - accumulated_testing_duration
+print(f"\nTotal tokens: {final_total_training_tokens}\n")
 
 # ------------------------------------------------------------------
 # Compression baselines on TEST corpus
@@ -701,7 +708,7 @@ gzip_compressed = gzip.compress(test_text_bytes)
 gzip_bytes = len(gzip_compressed)
 gzip_bits = gzip_bytes * 8
 gzip_bpb = gzip_bits / total_test_bytes
-gzip_ratio = gzip_bits / total_test_bits  # equivalente: gzip_bytes / total_test_bytes
+gzip_ratio = gzip_bits / total_test_bits    #   equivalent: gzip_bytes / total_test_bytes
 
 # BZ2
 bz2_compressed = bz2.compress(test_text_bytes)
@@ -733,10 +740,10 @@ rich.print(f"  Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
 rich.print(f"  Final Avg Training Loss: [yellow]{avg_loss:.4f}[/yellow]")
 rich.print("="*50 + "\n")
 
+
 # ----------------------------------------------------------------------
 # TRAINING/TESTING ERROR VS EPOCHS PLOTTING
 # ----------------------------------------------------------------------
-
 fig,ax = plt.subplots(figsize=(8,6), dpi=300)
 ax.plot(range(1, NUM_EPOCHS+1), train_loss_per_epoch, marker='.', linestyle='-')
 ax.plot(range(1, NUM_EPOCHS+1), test_loss_per_epoch, marker='.', linestyle='-')
@@ -745,7 +752,6 @@ ax.set_xlabel("Epoch", fontsize=12)
 ax.set_ylabel("Average Loss per Token", fontsize=12)
 ax.grid(True)
 # plt.show()
-
 
 
 # ----------------------------------------------------------------------
@@ -758,7 +764,7 @@ rnn.eval()
 total_test_loss = 0
 total_test_tokens = 0
 
-# ... (Testing Loop body remains unchanged) ...
+#   ... (Testing Loop body remains unchanged) ...
 with torch.no_grad():
     for step, token_ids_batch in enumerate(tqdm(
         torch.utils.data.DataLoader(
@@ -773,17 +779,17 @@ with torch.no_grad():
         
         token_ids_batch = token_ids_batch.to(DEVICE) 
 
-        # Forward Pass
+        #   Forward Pass
         logits = rnn(token_ids_batch)
         
-        # Prepare Logits and Targets
+        #   Prepare Logits and Targets
         logits_flat = logits[:, :-1, :].reshape(-1, logits.shape[-1])
         targets = token_ids_batch[:, 1:].reshape(-1)
         
-        # Calculate Loss
+        #   Calculate Loss
         loss = criterion(logits_flat, targets)
 
-        # weight the loss by the number of non-PAD tokens
+        #   weight the loss by the number of non-PAD tokens
         batch_tokens = (targets != PAD_IDX).sum().item()
         total_test_loss += loss.item() * batch_tokens
         total_test_tokens += batch_tokens
@@ -800,14 +806,14 @@ eval_sentence = "A dog is an amazing animal with a heart of a true lifemate of m
 rich.print("\n" + "="*50)
 rich.print("[bold blue]STARTING TOKENIZER EVALUATION (NLS + SUBWORD METRICS)[/bold blue]")
 
-# Count words (W) and characters (C)
+#   Count words (W) and characters (C)
 nls_word_count = len(eval_sentence.split())
 nls_char_count = len(eval_sentence.replace(" ", "").replace(",","")) 
 
-# Reference Tokenizer (for NLS_ref)
+#   Reference Tokenizer (for NLS_ref)
 t5_tokenizer = AutoTokenizer.from_pretrained("t5-base", use_fast=True)
 
-# A. Tokenize with the CURRENT Tokenizer
+#   A. Tokenize with the CURRENT Tokenizer
 current_token_ids = batch_tokenize({"text": [eval_sentence]}, max_length=max_seq_size, tokenizer=current_tokenizer)['token_ids'][0]
 non_padded_token_ids = torch.tensor([id for id in current_token_ids if id != PAD_IDX])
 actual_tokens = get_tokens_from_ids(non_padded_token_ids, current_tokenizer)
@@ -816,15 +822,15 @@ token_count = len(actual_tokens)
 rich.print(f"Tokenizer evaluation on '{eval_sentence}'")
 rich.print(f"Word Count: [green]{nls_word_count}[/green] | Char Count: [green]{nls_char_count}[/green]")
 
-# NLS_W (Subword Fertility)
+#   NLS_W (Subword Fertility)
 nls_w = token_count / nls_word_count
 rich.print(f"  NLS_w (Tokens per Word): [green]{nls_w:.4f}[/green]")
 
-# NLS_C
+#   NLS_C
 nls_c = token_count / nls_char_count
 rich.print(f"  NLS_c (Tokens per Character): [green]{nls_c:.4f}[/green]")
 
-# NLS (Reference)
+#   NLS (Reference)
 t5_tokenization = t5_tokenizer(
     eval_sentence,
     max_length=100,
@@ -838,7 +844,7 @@ nls_ref = token_count / t5_token_count
 rich.print(f"  NLS (Reference T/R): [green]{nls_ref:.4f}[/green] (Efficiency vs. t5)")
 
 
-# Subword Fertility and PCW
+#   Subword Fertility and PCW
 fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
 
 rich.print("\n[bold cyan]Subword Metrics:[/bold cyan]")
@@ -854,165 +860,160 @@ rich.print("="*50 + "\n")
 # ----------------------------------------------------------------------
 print_rnn_size_breakdown(rnn)
 
-# # ----------------------------------------------------------------------
-# # BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
-# # ----------------------------------------------------------------------
-# rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
-# # Reset gradients 
-# rnn.zero_grad()
-# rnn.train()
+#   Uncomment blocks below for plots visualization
+"""
+# ----------------------------------------------------------------------
+# BLOCK 8: GRADIENT VISUALIZATION TEST (Diagnostic Check)
+# ----------------------------------------------------------------------
+rich.print("[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
 
-# # 1. Get DUMMY token ids for the specific visualization size (10x10)
-# T_SIZE = 10
-# # Ensure token IDs are within the current vocabulary range
-# token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
-# token_ids_test = token_ids_test.to(DEVICE)
+#   Reset gradients 
+rnn.zero_grad()
+rnn.train()
 
-# # 2. Run forward pass with retain_ws=True to save embeddings for gradient extraction
-# logits = rnn(token_ids_test, retain_ws=True)
-
-# # 3. Compute the specific loss for the visualization test:
-# loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
-# loss_locations = loss_locations.to(DEVICE)
-# loss_test = logits.gather(index=loss_locations, dim=1).mean()
-
-# # 4. Backward pass to retrieve the gradients
-# loss_test.backward()
-# grad_magnitude = rnn.ws.grad.norm(dim=2)
-# rnn.ws = None # Clean up
-
-# # 5. Visualize the gradient
-# grad_magnitude[grad_magnitude==0] = -math.inf 
-# grad_magnitude = grad_magnitude.detach().cpu().numpy()
-# plt.figure(figsize=(8, 6))
-# plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-# plt.colorbar()
-# plt.grid(False)
-# plt.xlabel("$t$ (input)")
-# plt.ylabel("$t'$ (loss)")
-# plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
-# plt.show()
-
-# # ----------------------------------------------------------------------
-# # BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
-# # ----------------------------------------------------------------------
-# # Since the `RNNLM` does not use attention, this section is for conceptual comparison.
-
-# # Helper function to convert IDs back to tokens (handles all tokenizers)
-# def get_tokens_from_ids(token_ids, tokenizer):
-#     if isinstance(tokenizer, tokenizers.Tokenizer):
-#         # Assuming original tokenizers lib object has a proper vocabulary object
-#         if hasattr(tokenizer, 'get_vocabulary'):
-#             vocab = tokenizer.get_vocabulary()
-#             return [vocab[i] for i in token_ids]
-#         else:
-#             return [str(i) for i in token_ids] # Fallback
-#     elif isinstance(tokenizer, PreTrainedTokenizer):
-#         # Use transformers decoder
-#         return tokenizer.convert_ids_to_tokens(token_ids.tolist())
-#     return [str(i) for i in token_ids]
-
-# # Instantiate new embeddings for visualization (not part of the model)
-# embeddings = torch.nn.Embedding(current_vocab_size, current_embed_dim)
-# if TOKEN == 1:
-#     embeddings.weight.data = glove_vectors
-# embeddings.weight.requires_grad = False
-
-# # get a more natural sentence
-# sentence = "Masked attention allows implementing dependency constrains between inputs and outputs"
-# # Tokenize the sentence using the current tokenizer
-# # Use the batch_tokenize logic for consistency and get the first result
-# token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=15, tokenizer=current_tokenizer)['token_ids'][0])
-
-# tokens = get_tokens_from_ids(token_ids, current_tokenizer)
-# vectors = embeddings(token_ids)
+#   1. Get DUMMY token ids for the specific visualization size (10x10)
+T_SIZE = 10
+#   Ensure token IDs are within the current vocabulary range
+token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
+token_ids_test = token_ids_test.to(DEVICE)
 
 
-# """
-#     The plot_attention_map function is purely a visualization utility used to create and format a heatmap
-#     that represents attention weights. It takes the numerical attention scores and transforms them into
-#     an interpretable diagram.
-# """
-# def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:bool=False, ax=None, color_bar:bool=True):
-#     if ax is None:
-#         fig, ax = plt.subplots(figsize = (4,2), dpi=300) 
-#     else:
-#         fig = plt.gcf()
-#     im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
-#     ax.grid(False)
+#   2. Run forward pass with retain_ws=True to save embeddings for gradient extraction
+logits = rnn(token_ids_test, retain_ws=True)
+
+#   3. Compute the specific loss for the visualization test:
+loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
+loss_locations = loss_locations.to(DEVICE)
+loss_test = logits.gather(index=loss_locations, dim=1).mean()
+
+#   4. Backward pass to retrieve the gradients
+loss_test.backward()
+grad_magnitude = rnn.ws.grad.norm(dim=2)
+rnn.ws = None
+
+#   5. Visualize the gradient
+grad_magnitude[grad_magnitude==0] = -math.inf 
+grad_magnitude = grad_magnitude.detach().cpu().numpy()
+plt.figure(figsize=(8, 6))
+plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+plt.colorbar()
+plt.grid(False)
+plt.xlabel("$t$ (input)")
+plt.ylabel("$t'$ (loss)")
+plt.title("Magnitude of the gradient w.r.t. $\mathbf{w}_{1:T}$")
+plt.show()
+
+# ----------------------------------------------------------------------
+# BLOCK 9: ATTENTION MAP VISUALIZATION (Conceptual Check)
+# ----------------------------------------------------------------------
+# Since the `RNNLM` does not use attention, this section is for conceptual comparison.
+
+# Helper function to convert IDs back to tokens (handles all tokenizers)
+def get_tokens_from_ids(token_ids, tokenizer):
+    if isinstance(tokenizer, tokenizers.Tokenizer):
+        # Assuming original tokenizers lib object has a proper vocabulary object
+        if hasattr(tokenizer, 'get_vocabulary'):
+            vocab = tokenizer.get_vocabulary()
+            return [vocab[i] for i in token_ids]
+        else:
+            return [str(i) for i in token_ids] # Fallback
+    elif isinstance(tokenizer, PreTrainedTokenizer):
+        # Use transformers decoder
+        return tokenizer.convert_ids_to_tokens(token_ids.tolist())
+    return [str(i) for i in token_ids]
+
+# Instantiate new embeddings for visualization (not part of the model)
+embeddings = torch.nn.Embedding(current_vocab_size, current_embed_dim)
+if TOKEN == 1:
+    embeddings.weight.data = glove_vectors
+embeddings.weight.requires_grad = False
+
+#   get a more natural sentence
+sentence = "Masked attention allows implementing dependency constrains between inputs and outputs"
+
+#   Tokenize the sentence using the current tokenizer
+#   Use the batch_tokenize logic for consistency and get the first result
+token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=15, tokenizer=current_tokenizer)['token_ids'][0])
+tokens = get_tokens_from_ids(token_ids, current_tokenizer)
+vectors = embeddings(token_ids)
+
+
+def plot_attention_map(attention_map, queries_labels, keys_labels, print_values:bool=False, ax=None, color_bar:bool=True):
+    if ax is None:
+        fig, ax = plt.subplots(figsize = (4,2), dpi=300) 
+    else:
+        fig = plt.gcf()
+    im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
+    ax.grid(False)
     
-#     # Set font size for the Y-axis labels
-#     ax.set_yticks(np.arange(len(queries_labels)))
-#     ax.set_yticklabels(queries_labels, fontsize=4) 
-    
-#     # Set font size for the X-axis labels
-#     ax.set_xticks(np.arange(len(keys_labels)))
-#     ax.set_xticklabels(keys_labels, fontsize=4) 
-    
-#     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    # Set font size for the Y-axis labels
+    ax.set_yticks(np.arange(len(queries_labels)))
+    ax.set_yticklabels(queries_labels, fontsize=4) 
+  
+    # Set font size for the X-axis labels
+    ax.set_xticks(np.arange(len(keys_labels)))
+    ax.set_xticklabels(keys_labels, fontsize=4) 
+  
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
-#     if print_values:
-#         for i in range(len(queries_labels)):
-#             for j in range(len(keys_labels)):
-#                 text = ax.text(j, i, f"{attention_map[i, j]:.2f}",
-#                             ha="center", va="center", color="w", fontsize=4)
+    if print_values:
+        for i in range(len(queries_labels)):
+            for j in range(len(keys_labels)):
+                text = ax.text( j, i, f"{attention_map[i, j]:.2f}",
+                                ha="center", va="center", color="w", fontsize=4)
 
-#     if color_bar:
-#       cbar = fig.colorbar(im, fraction=0.02, pad=0.04, shrink=0.7)
-#       cbar.ax.tick_params(labelsize=4)
+    if color_bar:
+        cbar = fig.colorbar(im, fraction=0.02, pad=0.04, shrink=0.7)
+        cbar.ax.tick_params(labelsize=4)
       
-#     fig.tight_layout()
+    fig.tight_layout()
 
 
-# """
-#     The masked_attention function implements a simplified version of the scaled dot-product attention mechanism
-#     used in Transformers, with the crucial addition of an optional masking operation
-# """
-# def masked_attention(Q, K, V, tau=None, mask=None):
-#     """A simple masked attention layer"""
-#     if tau is None:
-#         tau = math.sqrt(float(Q.shape[-1]))
-#     assert Q.shape[-1] == K.shape[-1]
-#     assert K.shape[0] == V.shape[0]
-#     attention_map = Q @ K.T / tau
-#     if mask is not None:
-#         attention_map = mask + attention_map
-#     attention_weights = attention_map.softmax(dim=1)
-#     return torch.einsum("qk, kh -> qh", attention_weights, V), attention_weights
+def masked_attention(Q, K, V, tau=None, mask=None):
+    if tau is None:
+        tau = math.sqrt(float(Q.shape[-1]))
+    assert Q.shape[-1] == K.shape[-1]
+    assert K.shape[0] == V.shape[0]
+    attention_map = Q @ K.T / tau
+    if mask is not None:
+        attention_map = mask + attention_map
+    attention_weights = attention_map.softmax(dim=1)
+    return torch.einsum("qk, kh -> qh", attention_weights, V), attention_weights
 
 
-# # EXERCISE: Implement the masks corresponding to each factorization
-# T = len(token_ids)
-# masks = {
-#     "left-to-right": torch.triu(torch.ones(T, T), diagonal=0),
-#     "bidirectional": torch.zeros(T, T),
-#     "right-to-left": torch.tril(torch.ones(T, T), diagonal=0)
-# }
-# for key in masks.keys():
-#     if masks[key] is not None:
-#         # Convert 1s to -inf and 0s to 0 to mask logits before softmax
-#         masks[key] = torch.where(masks[key] == 0, 0.0, -math.inf)
+# EXERCISE: Implement the masks corresponding to each factorization
+T = len(token_ids)
+masks = {
+    "left-to-right": torch.triu(torch.ones(T, T), diagonal=0),
+    "bidirectional": torch.zeros(T, T),
+    "right-to-left": torch.tril(torch.ones(T, T), diagonal=0)
+}
+for key in masks.keys():
+    if masks[key] is not None:
+        # Convert 1s to -inf and 0s to 0 to mask logits before softmax
+        masks[key] = torch.where(masks[key] == 0, 0.0, -math.inf)
 
-# # visualized the log of the masked attention map
-# fig, axes = plt.subplots(ncols=1+len(masks), figsize = (8,6), sharex=False, sharey=False, dpi=300)
+#   visualized the log of the masked attention map
+fig, axes = plt.subplots(ncols=1+len(masks), figsize = (8,6), sharex=False, sharey=False, dpi=300)
 
-# # plot the gradient map from the RNN LM
-# axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-# axes.flat[0].set_xlabel("$t$ (input)",fontsize=4)
-# axes.flat[0].set_ylabel("$t'$ (output)",fontsize=4)
-# axes.flat[0].grid(False)
-# axes.flat[0].set_title("Gradient map (RNN LM)",fontsize=6)
-# axes.flat[0].tick_params(axis='both', which='major', labelsize=4)
+#   plot the gradient map from the RNN LM
+axes.flat[0].imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+axes.flat[0].set_xlabel("$t$ (input)",fontsize=4)
+axes.flat[0].set_ylabel("$t'$ (output)",fontsize=4)
+axes.flat[0].grid(False)
+axes.flat[0].set_title("Gradient map (RNN LM)",fontsize=6)
+axes.flat[0].tick_params(axis='both', which='major', labelsize=4)
 
-# # plot the attention map
-# for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
-#     if mask is not None:
-#         # Use zero matrix for Q, K, V as we only care about the mask effect on attention map
-#         H, attention_map_masked = masked_attention(vectors, vectors, vectors, mask=mask)
+#   plot the attention map
+for ax, (mask_name, mask) in zip(axes.flat[1:], masks.items()):
+    if mask is not None:
+        #   Use zero matrix for Q, K, V as we only care about the mask effect on attention map
+        H, attention_map_masked = masked_attention(vectors, vectors, vectors, mask=mask)
 
-#         # Use log() to better visualize the zero/masked areas
-#         plot_attention_map(attention_map_masked.log(), tokens, tokens, ax=ax, color_bar=False)
-#     ax.set_title(f"Attention map {mask_name}",fontsize=6)
-# plt.tight_layout()
-# plt.show()
+        # Use log() to better visualize the zero/masked areas
+        plot_attention_map(attention_map_masked.log(), tokens, tokens, ax=ax, color_bar=False)
+    ax.set_title(f"Attention map {mask_name}",fontsize=6)
+plt.tight_layout()
+plt.show()
+"""

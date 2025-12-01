@@ -167,9 +167,9 @@ else:
 #   MODEL SETUP (Weights)
 config = AutoConfig.from_pretrained(arch_name) 
 config.vocab_size = current_vocab_size 
-config.hidden_size = 240                    #   Must be multiple of 12 (number of attention heads) Same as RNN
-config.num_hidden_layers = 11                #   Down from 12 (BERT-base)
-config.intermediate_size = 1024             #   Must be adjusted proportionally
+config.hidden_size = 240                        #   Must be multiple of 12 (number of attention heads) Same as RNN
+config.num_hidden_layers = 11                   #   Down from 12 (BERT-base)
+config.intermediate_size = 1024                 #   Must be adjusted proportionally
 
 config.output_hidden_states = True
 config.output_attentions = True
@@ -205,7 +205,8 @@ def custom_collate_fn(batch):
     and convert them into a single long tensor.
     """
     token_ids_list = [item['token_ids'] for item in batch]
-    return torch.tensor(token_ids_list, dtype=torch.long) 
+    return torch.tensor(token_ids_list, dtype=torch.long)
+
 
 def get_tokens_from_ids(token_ids, tokenizer):
     if isinstance(tokenizer, tokenizers.Tokenizer):
@@ -217,6 +218,7 @@ def get_tokens_from_ids(token_ids, tokenizer):
     elif isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)): 
         return tokenizer.convert_ids_to_tokens(token_ids.tolist())
     return [str(i) for i in token_ids]
+
 
 def batch_tokenize(
     batch: List[Dict[str, Any]], 
@@ -265,6 +267,7 @@ def batch_tokenize(
         
     else:
         raise TypeError(f"Unsupported tokenizer type: {type(tokenizer)}")
+    
 
 def count_chars(sample, key):
     # Save text
@@ -273,6 +276,7 @@ def count_chars(sample, key):
     text = text.replace(" ", "").replace(",", "")
     return len(text)
 
+
 def count_bytes(sample, key, encoding="utf-8"):
     """
     Counts the number of bytes in the given text sample when encoded with the specified encoding.
@@ -280,6 +284,7 @@ def count_bytes(sample, key, encoding="utf-8"):
     text = sample[key]
     text = text.replace(" ", "").replace(",", "")
     return len(text.encode(encoding))
+
 
 # ----------------------------------------------------------------------
 #  SIZE BREAKDOWN HELPERS 
@@ -444,6 +449,7 @@ train_dataloader = torch.utils.data.DataLoader(
     pin_memory=True,      # Speeds up data transfer to GPU
 )
 
+
 # ----------------------------------------------------------------------
 #   MODEL INSTANTIATION, LOSS, AND OPTIMIZER
 # ----------------------------------------------------------------------
@@ -457,6 +463,7 @@ criterion = criterion.to(DEVICE)
 
 #   Define the Optimizer
 optimizer = torch.optim.Adam(current_model.parameters(), lr=1e-5) 
+
 
 # ----------------------------------------------------------------------
 #   FINE-TUNING LOOP
@@ -473,9 +480,9 @@ total_test_bytes = sum(
     count_bytes(sample, key="Text" if DATASET_OPTION == 2 else "text")
     for sample in dataset["test"]
 )
-total_test_bits = total_test_bytes * 8 # assuming 8 bits per byte
+total_test_bits = total_test_bytes * 8
 
-# Prepare the full test text for compression baselines
+#   Prepare the full test text for compression baselines
 test_text = "".join(
     sample["Text" if DATASET_OPTION == 2 else "text"].replace(" ", "").replace(",", "")
     for sample in dataset["test"]
@@ -483,11 +490,12 @@ test_text = "".join(
 test_text_bytes = test_text.encode("utf-8")
 
 start_time = time.time()
-accumulated_testing_duration = 0.0 # to track total testing time
+accumulated_testing_duration = 0.0
 
 
 train_loss_per_epoch = []
 test_loss_per_epoch = []
+final_total_training_tokens = 0
 
 for epoch in range(NUM_EPOCHS):
     rich.print(f"[bold blue]-- Epoch {epoch+1}/{NUM_EPOCHS} --[/bold blue]")
@@ -519,7 +527,7 @@ for epoch in range(NUM_EPOCHS):
         # 4. Calculate Loss
         loss = criterion(logits_flat, targets)
 
-        # weight the loss by the number of non-PAD tokens
+        #   weight the loss by the number of non-PAD tokens
         batch_tokens = (targets != PAD_IDX).sum().item()
         total_loss += loss.item() * batch_tokens
         total_tokens += batch_tokens
@@ -530,6 +538,8 @@ for epoch in range(NUM_EPOCHS):
         
     avg_loss = total_loss / total_tokens
     train_loss_per_epoch.append(avg_loss)
+
+    final_total_training_tokens += total_tokens
 
 
     # TESTING PHASE at the end of each epoch
@@ -590,23 +600,30 @@ for epoch in range(NUM_EPOCHS):
     # BITS PER CHARACTER (BPC) CALCULATION
     #---------------------------------------
     total_test_nll_nats = total_test_loss
+
     # Convert to bits
     total_test_nll_bits = total_test_nll_nats / math.log(2.0)
+
     # BPC = total bits / nº of characters in test set
     test_bpc = total_test_nll_bits / total_test_chars
+
     #---------------------------------------
     # BITS PER BYTE (BPB) CALCULATION
     bpb_model = total_test_nll_bits / total_test_bytes
+
     #---------------------------------------
     # COMPRESSION RATIO ESTIMATION
     # Assuming 8 bits per byte in original text
     compression_ratio_model = total_test_nll_bits / total_test_bits
+
     #---------------------------------------
     # NLL per char
     nll_per_char_nats = total_test_loss / total_test_chars
+
     #---------------------------------------
     # PERPLEXITY PER CHARACTER
     perplexity_per_char = math.exp(nll_per_char_nats)
+
     #---------------------------------------
     # ENTROPY RATE per char
     entropy_rate_nats_per_token = total_entropy_nats / total_test_tokens
@@ -637,6 +654,7 @@ for epoch in range(NUM_EPOCHS):
 end_time = time.time()
 total_time = end_time - start_time - accumulated_testing_duration # exclude testing time
 rich.print(f"Total Training Time: [yellow]{total_time:.2f} seconds[/yellow]")
+print(f"Total tokens: {final_total_training_tokens}\n")
 
 
 # Use the same sentence from the attention map visualization, as to evaluate the token's metrics
@@ -749,147 +767,142 @@ def calculate_subword_metrics(sentence: str, tokenizer: Any, tokens: List[str]) 
     #   PCW = (Number of split words) / (Total number of words)
     proportion_continued_words = split_words_count / total_words if total_words > 0 else 0.0
   
-    # Note: Split words count in this methodology starts counting *after* the initial word part
-    # A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
-  
+    #   Note: Split words count in this methodology starts counting *after* the initial word part
+    #   A word "mammal" split into ["ma", "##mmal"] is counted as 1 split word if '##mmal' is found.
     return fertility, proportion_continued_words
+
 fertility, pcw = calculate_subword_metrics(eval_sentence, current_tokenizer, actual_tokens)
 rich.print(f"Subword Fertility (Ideal: 1.0): [green]{fertility:.4f}[/green]")
 rich.print(f"Proportion of Continued Words (Ideal: 0.0): [green]{pcw:.4f}[/green]")
 rich.print("\n[bold blue]Subword Fertility Metrics Complete.[/bold blue]")
 
 
-# # ----------------------------------------------------------------------
-# #   GRADIENT VISUALIZATION TEST
-# # ----------------------------------------------------------------------
-
-# rich.print("\n[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
-
-# #   Reset gradients 
-# current_model.zero_grad()
-
-# T_SIZE = 10
-# token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
-# token_ids_test = token_ids_test.to(DEVICE)
-
-# #   Get the internal Embedding layer (Model-specific access)
-# wte = None
-# if hasattr(current_model, 'transformer') and hasattr(current_model.transformer, 'wte'):
-#     wte = current_model.transformer.wte                     #   GPT2 access
-# elif hasattr(current_model, 'bert') and hasattr(current_model.bert.embeddings, 'word_embeddings'):
-#     wte = current_model.bert.embeddings.word_embeddings     #   BERT access
-    
-# if wte is not None:
-#     #   The `wte` layer converts the long tensor (IDs) to a float tensor (Embeddings)
-#     input_embeddings = wte(token_ids_test)
-    
-#     #   Now, set requires_grad and retain_grad on the continuous embedding tensor
-#     input_embeddings.requires_grad_(True) 
-#     input_embeddings.retain_grad()
-    
-#     #   Run the rest of the model from the embeddings
-#     outputs = current_model(inputs_embeds=input_embeddings)
-#     logits = outputs.logits
-    
-#     #   Compute the specific loss for the visualization test
-#     loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
-#     loss_locations = loss_locations.to(DEVICE)
-#     loss_test = logits.gather(index=loss_locations, dim=1).mean()
-    
-#     #   Backward pass to retrieve the gradients
-#     loss_test.backward()
-    
-#     #   The magnitude is the L2 norm of the gradient w.r.t. the input embeddings
-#     grad_magnitude = input_embeddings.grad.norm(dim=2)
-    
-#     #   Visualize the gradient
-#     grad_magnitude[grad_magnitude==0] = -math.inf 
-#     grad_magnitude = grad_magnitude.detach().cpu().numpy()
-#     plt.figure(figsize=(8, 6))
-#     plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
-#     cbar = plt.colorbar() 
-#     cbar.ax.tick_params(labelsize=10)
-#     plt.grid(False)
-#     plt.xlabel("$t$ (input)",fontsize=10)
-#     plt.ylabel("$t'$ (loss)",fontsize=10)
-#     plt.title(f"Gradient Magnitude (Arch: {arch_settings['name']}, Token: {token_settings['name']})",fontsize=16)
-#     plt.show()
-
-#     #   -----------------------------------------------------------------------------
-
-#     #   Get the size of the WTE for comparison (LUT table)
-#     wte_params = wte.weight.numel() 
-#     total_wte = wte_params * 4        #   Bytes/parameter (float32)
-
-#     #   Get the size related to the MODEL and WTE together (obtain parameters' amount & related B size)
-#     total_params = sum(p.numel() for p in current_model.parameters())
-#     total_bytes = total_params * 4
-#     total_model = total_bytes - total_wte
-
 print_transformer_size_breakdown(current_model)
-# else:
-#     rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
 
-# # ----------------------------------------------------------------------
-# #   ATTENTION MAP VISUALIZATION
-# # ----------------------------------------------------------------------
 
-# rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
+#   Uncomment section below for gradient visualization plots
+"""
+# ----------------------------------------------------------------------
+#   GRADIENT VISUALIZATION TEST
+# ----------------------------------------------------------------------
 
-# #   get a more natural sentence
-# sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
+rich.print("\n[bold yellow]STARTING GRADIENT VISUALIZATION TEST...[/bold yellow]")
+#   Reset gradients 
+current_model.zero_grad()
+T_SIZE = 10
+token_ids_test = torch.randint(low=0, high=current_vocab_size, size=(T_SIZE, T_SIZE))
+token_ids_test = token_ids_test.to(DEVICE)
+#   Get the internal Embedding layer (Model-specific access)
+wte = None
+if hasattr(current_model, 'transformer') and hasattr(current_model.transformer, 'wte'):
+    wte = current_model.transformer.wte                     #   GPT2 access
+elif hasattr(current_model, 'bert') and hasattr(current_model.bert.embeddings, 'word_embeddings'):
+    wte = current_model.bert.embeddings.word_embeddings     #   BERT access
+  
+if wte is not None:
+    #   The `wte` layer converts the long tensor (IDs) to a float tensor (Embeddings)
+    input_embeddings = wte(token_ids_test)
+  
+    #   Now, set requires_grad and retain_grad on the continuous embedding tensor
+    input_embeddings.requires_grad_(True) 
+    input_embeddings.retain_grad()
+  
+    #   Run the rest of the model from the embeddings
+    outputs = current_model(inputs_embeds=input_embeddings)
+    logits = outputs.logits
+  
+    #   Compute the specific loss for the visualization test
+    loss_locations = torch.arange(0, T_SIZE)[:, None, None].expand(T_SIZE, 1, logits.shape[-1])
+    loss_locations = loss_locations.to(DEVICE)
+    loss_test = logits.gather(index=loss_locations, dim=1).mean()
+  
+    #   Backward pass to retrieve the gradients
+    loss_test.backward()
+  
+    #   The magnitude is the L2 norm of the gradient w.r.t. the input embeddings
+    grad_magnitude = input_embeddings.grad.norm(dim=2)
+  
+    #   Visualize the gradient
+    grad_magnitude[grad_magnitude==0] = -math.inf 
+    grad_magnitude = grad_magnitude.detach().cpu().numpy()
+    plt.figure(figsize=(8, 6))
+    plt.imshow(grad_magnitude, sns.color_palette("viridis", as_cmap=True))
+    cbar = plt.colorbar() 
+    cbar.ax.tick_params(labelsize=10)
+    plt.grid(False)
+    plt.xlabel("$t$ (input)",fontsize=10)
+    plt.ylabel("$t'$ (loss)",fontsize=10)
+    plt.title(f"Gradient Magnitude (Arch: {arch_settings['name']}, Token: {token_settings['name']})",fontsize=16)
+    plt.show()
+    #   -----------------------------------------------------------------------------
+    #   Get the size of the WTE for comparison (LUT table)
+    wte_params = wte.weight.numel() 
+    total_wte = wte_params * 4        #   Bytes/parameter (float32)
+    #   Get the size related to the MODEL and WTE together (obtain parameters' amount & related B size)
+    total_params = sum(p.numel() for p in current_model.parameters())
+    total_bytes = total_params * 4
+    total_model = total_bytes - total_wte
+else:
+    rich.print("[bold red]ERROR:[/bold red] Could not reliably access the Word Token Embedding (WTE) layer for gradient test.")
 
-# #   Tokenize the sentence 
-# full_token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=25, tokenizer=current_tokenizer)['token_ids'][0])
-# token_ids_list = [id for id in full_token_ids if id != PAD_IDX]
-# token_ids = torch.tensor(token_ids_list) 
 
-# # Get token names only for the actual content
-# tokens = get_tokens_from_ids(token_ids, current_tokenizer)
+# ----------------------------------------------------------------------
+#   ATTENTION MAP VISUALIZATION
+# ----------------------------------------------------------------------
 
-# #   Pass the input to the model to get attention weights
-# input_ids_tensor = token_ids.unsqueeze(0).to(DEVICE)
+rich.print("[bold yellow]STARTING ATTENTION MAP VISUALIZATION (Transformer)...[/bold yellow]")
+#   get a more natural sentence
+sentence = "A dog is a really stunning mammal from the animal kingdom and is also considered the best friend of men"
+#   Tokenize the sentence 
+full_token_ids = torch.tensor(batch_tokenize({"text": [sentence]}, max_length=25, tokenizer=current_tokenizer)['token_ids'][0])
+token_ids_list = [id for id in full_token_ids if id != PAD_IDX]
+token_ids = torch.tensor(token_ids_list)
 
-# #   Run the forward pass, ensuring attention is outputted
-# outputs = current_model(input_ids_tensor, output_attentions=True)
+#   Get token names only for the actual content
+tokens = get_tokens_from_ids(token_ids, current_tokenizer)
 
-# if hasattr(outputs, 'attentions') and outputs.attentions is not None:
-#     attention_layers = outputs.attentions
-#     attention_map_all_heads = attention_layers[-1].squeeze(0).mean(dim=0).detach().cpu().numpy()
-    
-#     #   Clamp to the actual sequence length (ignore padding)
-#     actual_len = len(tokens)
-#     attention_map_plot = attention_map_all_heads[:actual_len, :actual_len]
-    
-#     def plot_transformer_attention_map(attention_map, labels):
-#         fig, ax = plt.subplots(figsize = (6, 3), dpi=300) 
-        
-#         im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
-#         ax.grid(False)
-        
-#         ax.set_yticks(np.arange(len(labels)))
-#         ax.set_yticklabels(labels, fontsize=3) 
-#         ax.set_xticks(np.arange(len(labels)))
-#         ax.set_xticklabels(labels, fontsize=3) 
-        
-#         plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-        
-#         ax.set_ylabel("Query (Q)", fontsize=7) 
-#         ax.set_xlabel("Key (K)", fontsize=7) 
-        
-#         cbar = fig.colorbar(im, 
-#                             fraction=0.046,     #   fraction and pad slightly adjusted for bottom position
-#                             pad=0.04, 
-#                             location='right',   #   Place color bar horizontally at the bottom
-#                             shrink=0.75)        #   Shrink the color bar size
-        
-#         cbar.ax.tick_params(labelsize=4)
-#         fig.tight_layout()
-#         return fig, ax
+#   Pass the input to the model to get attention weights
+input_ids_tensor = token_ids.unsqueeze(0).to(DEVICE)
 
-#     fig, ax = plot_transformer_attention_map(attention_map_plot, tokens)
-#     ax.set_title(f"Attention Map (Arch: {arch_settings['name']}, Token: {token_settings['name']})", fontsize=8)
-#     plt.show()
-    
-# else:
-#     rich.print("[bold red]ERROR:[/bold red] Transformer model did not return attention weights. Cannot visualize attention map.")
+#   Run the forward pass, ensuring attention is outputted
+outputs = current_model(input_ids_tensor, output_attentions=True)
+if hasattr(outputs, 'attentions') and outputs.attentions is not None:
+    attention_layers = outputs.attentions
+    attention_map_all_heads = attention_layers[-1].squeeze(0).mean(dim=0).detach().cpu().numpy()
+  
+    #   Clamp to the actual sequence length (ignore padding)
+    actual_len = len(tokens)
+    attention_map_plot = attention_map_all_heads[:actual_len, :actual_len]
+  
+    def plot_transformer_attention_map(attention_map, labels):
+        fig, ax = plt.subplots(figsize = (6, 3), dpi=300) 
+      
+        im = ax.imshow(attention_map, cmap=sns.color_palette("viridis", as_cmap=True))
+        ax.grid(False)
+      
+        ax.set_yticks(np.arange(len(labels)))
+        ax.set_yticklabels(labels, fontsize=3) 
+        ax.set_xticks(np.arange(len(labels)))
+        ax.set_xticklabels(labels, fontsize=3) 
+      
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+      
+        ax.set_ylabel("Query (Q)", fontsize=7) 
+        ax.set_xlabel("Key (K)", fontsize=7) 
+      
+        cbar = fig.colorbar(im, 
+                            fraction=0.046,     #   fraction and pad slightly adjusted for bottom position
+                            pad=0.04, 
+                            location='right',   #   Place color bar horizontally at the bottom
+                            shrink=0.75)        #   Shrink the color bar size
+      
+        cbar.ax.tick_params(labelsize=4)
+        fig.tight_layout()
+        return fig, ax
+    fig, ax = plot_transformer_attention_map(attention_map_plot, tokens)
+    ax.set_title(f"Attention Map (Arch: {arch_settings['name']}, Token: {token_settings['name']})", fontsize=8)
+    plt.show()
+  
+else:
+    rich.print("[bold red]ERROR:[/bold red] Transformer model did not return attention weights. Cannot visualize attention map.")
+"""
