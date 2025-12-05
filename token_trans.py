@@ -41,7 +41,7 @@ if not Path(GLOVE_PICKLE_FILE).exists():
     rich.print(f"[bold cyan]Saving GloVe data to {GLOVE_PICKLE_FILE} ...[/bold cyan]")
 
     #   This import automatically downloads the full dataset
-    from script1 import glove_vectors, glove_vocabulary, glove_tokenizer
+    from token_utils import glove_vectors, glove_vocabulary, glove_tokenizer
     
     glove_data_to_save = {
         "vectors": glove_vectors,

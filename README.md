@@ -36,6 +36,12 @@ The file `token_rec.py` (referring to the RNN language model) is designed to run
 python token_rec.py <TOKEN> <DATASET_OPTION> <max_dataset_size>
 ```
 
+**Example:**
+
+```bash
+python token_rec.py 1 2 10000
+```
+
 <br>
 
 ### `token_rec.py` (RNN Language Model)
@@ -52,20 +58,20 @@ python token_trans.py <MODEL> <TOKEN> <DATASET_OPTION> <max_dataset_size>
 
 ### Models, Tokenizers & Datasets employed
 
-**Models (Random Weight Initialization)**
+**Models (Random Weight Initialization) (from 1 to 3)**
 
 * Base (GloVe-compatible)
 * BERT-config
 * GPT-2-config
 
-**Tokenizers**
+**Tokenizers (from 1 to 4)**
 
 * GloVe Tokenizer
 * BERT WordPiece Tokenizer
 * GPT-2 BPE Tokenizer
 * Byte-level encoding
 
-**Datasets**
+**Datasets (from 1 to 3)**
 
 * AG News dataset
 * Tiny Shakespeare dataset
